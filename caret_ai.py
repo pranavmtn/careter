@@ -192,6 +192,17 @@ def foreground_window():
     return hwnd, name
 
 
+LOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "careter.log")
+
+
+def log(msg):
+    try:
+        with open(LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(time.strftime("%H:%M:%S ") + msg + "\n")
+    except Exception:
+        pass
+
+
 def run_with_timeout(fn, seconds, default=None):
     """UI Automation can hang on a frozen app; never let it block the hotkey."""
     box = [default]
@@ -216,8 +227,14 @@ def read_text_context(words=CONTEXT_WORDS):
         return None
     import uiautomation as auto
     with auto.UIAutomationInitializerInThread():
-        ctrl = auto.GetFocusedControl()
-        tp = ctrl.GetPattern(auto.PatternId.TextPattern) if ctrl else None
+        ctrl, tp = auto.GetFocusedControl(), None
+        for _ in range(6):                    # the focused node may be a child of the text box
+            if not ctrl:
+                break
+            tp = ctrl.GetPattern(auto.PatternId.TextPattern)
+            if tp:
+                break
+            ctrl = ctrl.GetParentControl()
         sel = tp.GetSelection() if tp else None
         if not sel:
             return None
@@ -225,27 +242,67 @@ def read_text_context(words=CONTEXT_WORDS):
         START, END = auto.TextPatternRangeEndpoint.Start, auto.TextPatternRangeEndpoint.End
         selected = caret.GetText(4000)
 
-        block = caret.Clone()
-        block.ExpandToEnclosingUnit(auto.TextUnit.Paragraph)
-        new_block = not selected.strip() and not block.GetText(2000).strip()
-
-        before = ""
-        if not new_block:
-            b = caret.Clone()
-            b.MoveEndpointByRange(END, caret, START)          # collapse to the caret start
-            b.MoveEndpointByUnit(START, auto.TextUnit.Word, -words)
-            before = b.GetText(8000)
+        b = caret.Clone()
+        b.MoveEndpointByRange(END, caret, START)              # collapse to the caret start
+        b.MoveEndpointByUnit(START, auto.TextUnit.Word, -words)
+        before = b.GetText(8000)
         a = caret.Clone()
         a.MoveEndpointByRange(START, caret, END)              # collapse to the caret end
         a.MoveEndpointByUnit(END, auto.TextUnit.Word, words)
         after = a.GetText(8000)
 
+    return trim_context(before, selected, after, words)
+
+
+def trim_context(before, selected, after, words=CONTEXT_WORDS):
+    """Keep ~N words each side, only within the current section (a blank line ends a section)."""
+    before, after = before.replace("\r\n", "\n"), after.replace("\r\n", "\n")
     if SECTION_BREAKS:
-        before = re.split(r"\n[ \t]*\n", before)[-1]          # only this section
+        before = re.split(r"\n[ \t]*\n", before)[-1]
         after = re.split(r"\n[ \t]*\n", after)[0]
+    b_words = re.findall(r"\S+\s*", before)
+    if len(b_words) > words:
+        before = "".join(b_words[-words:])
+    a_words = re.findall(r"\s*\S+", after)
+    if len(a_words) > words:
+        after = "".join(a_words[:words])
     if not (before.strip() or selected.strip() or after.strip()):
         return None
     return before, selected, after
+
+
+def read_context_by_keys(proc):
+    """Fallback for apps that don't share their text (browser editors, Electron apps):
+    select caret->start, copy, press Right (caret goes back); select caret->end, copy, press Left.
+    Clipboard is restored. Never used in terminals, or when text is already selected."""
+    if (IS_WIN and proc in TERMINALS) or not (IS_WIN or IS_MAC):
+        return None
+    mod = "command" if IS_MAC else "ctrl"
+    to_start = ("command", "shift", "up") if IS_MAC else ("ctrl", "shift", "home")
+    to_end = ("command", "shift", "down") if IS_MAC else ("ctrl", "shift", "end")
+    try:
+        old = pyperclip.paste()
+    except Exception:
+        old = ""
+
+    def copy_with(keys, collapse_key):
+        sentinel = f"__careter_{time.time()}__"
+        pyperclip.copy(sentinel)
+        pyautogui.hotkey(*keys)
+        time.sleep(0.05)
+        pyautogui.hotkey(mod, "c")
+        time.sleep(0.2)
+        text = pyperclip.paste()
+        pyautogui.press(collapse_key)        # collapse the selection back onto the caret
+        time.sleep(0.05)
+        return "" if text == sentinel else text
+
+    try:
+        before = copy_with(to_start, "right")
+        after = copy_with(to_end, "left")
+    finally:
+        pyperclip.copy(old)
+    return trim_context(before, "", after)
 
 
 def format_context(ctx):
@@ -455,6 +512,15 @@ class Session:
             preview = preview[:60] + ("…" if len(preview) > 60 else "")
             tk.Label(box, text=f"✎ “{preview}”", bg=BG, fg=MUTED, font=FONT, anchor="w",
                      justify="left", wraplength=WRAP).pack(fill="x", pady=(0, 4))
+
+        # what was read around the caret
+        if ctx and not selection:
+            n = len((ctx[0] + " " + ctx[2]).split())
+            tk.Label(box, text=f"📄 read {n} words around the caret", bg=BG, fg=MUTED, font=FONT,
+                     anchor="w").pack(fill="x", pady=(0, 4))
+        elif not ctx and not selection:
+            tk.Label(box, text="📷 couldn't read text here, using the screenshot", bg=BG, fg=MUTED,
+                     font=FONT, anchor="w").pack(fill="x", pady=(0, 4))
 
         # input row
         row = tk.Frame(box, bg=BG)
@@ -906,6 +972,11 @@ class App:
             ctx = run_with_timeout(read_text_context, 1.5)
             # UI Automation gives the selection directly; only fall back to Ctrl+C when it can't
             selection = ctx[1] if ctx else grab_selection(proc)
+            if not ctx and not selection:
+                ctx = read_context_by_keys(proc)
+            elif not ctx and selection:
+                ctx = ("", selection, "")
+            log(f"app={proc} context={'none' if not ctx else format_context(ctx)[:300]!r}")
             shot = capture(anchor)
             self.q.put(lambda: self.open(anchor, below_y, bounds, shot, hwnd, proc, selection, ctx))
         finally:
