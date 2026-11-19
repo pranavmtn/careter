@@ -208,6 +208,17 @@ def caret_rect():
     return top_left.x, top_left.y, bottom.y
 
 
+def window_title(hwnd):
+    if not (IS_WIN and hwnd):
+        return ""
+    import ctypes
+    user32 = ctypes.windll.user32
+    n = user32.GetWindowTextLengthW(hwnd)
+    buf = ctypes.create_unicode_buffer(n + 1)
+    user32.GetWindowTextW(hwnd, buf, n + 1)
+    return buf.value
+
+
 def monitor_bounds(x, y):
     with mss.mss() as sct:
         m = next((m for m in sct.monitors[1:]
@@ -350,6 +361,10 @@ class Session:
         self.decision = None
         self.decided = threading.Event()
         self.moved = False
+        self.acting = False          # True while we are typing into the target app
+        self.away = False            # True while hidden because the user is in another window
+        self.had_focus = False
+        self.title = window_title(hwnd)
 
         win = self.win = tk.Toplevel(app.root)
         win.overrideredirect(True)                 # no title bar: looks like a tooltip
@@ -400,6 +415,41 @@ class Session:
 
         self.place()
         win.after(30, self.grab_focus)
+        if IS_WIN:
+            win.after(400, self.watch)
+
+    # --- only show where it was called
+    def my_hwnd(self):
+        import ctypes
+        return ctypes.windll.user32.GetAncestor(self.win.winfo_id(), 2)   # GA_ROOT
+
+    def watch(self):
+        """Close (idle) or hide (working) when the user leaves the window/tab it was opened in."""
+        if not self.alive:
+            return
+        try:
+            if not self.acting:
+                import ctypes
+                fg = ctypes.windll.user32.GetForegroundWindow()
+                mine = self.my_hwnd()
+                in_target = fg == self.hwnd and window_title(self.hwnd) == self.title
+                if fg == mine:
+                    self.had_focus = True
+                elif not self.busy:
+                    # idle: clicking elsewhere, switching app or tab closes it, like a tooltip
+                    if self.had_focus or not in_target:
+                        self.close()
+                        return
+                elif not in_target and not self.away:
+                    self.away = True             # working: hide while you're elsewhere
+                    self.win.withdraw()
+                elif in_target and self.away:
+                    self.away = False
+                    self.win.deiconify()
+                    self.win.attributes("-topmost", True)
+        except Exception:
+            pass
+        self.win.after(250, self.watch)
 
     # --- widgets
     def icon(self, parent, text, cmd):
@@ -636,6 +686,7 @@ class Session:
             self.busy = False
 
     def hide(self):
+        self.acting = True
         done = threading.Event()
 
         def _hide():
@@ -651,7 +702,15 @@ class Session:
         time.sleep(0.25)
 
     def show(self):
-        self.ui(lambda: (self.win.deiconify(), self.win.attributes("-topmost", True), self.grab_focus()))
+        def _show():
+            self.title = window_title(self.hwnd)   # commands can change the window title
+            self.away = False
+            self.had_focus = False
+            self.win.deiconify()
+            self.win.attributes("-topmost", True)
+            self.grab_focus()
+            self.acting = False
+        self.ui(_show)
 
     def close_from_thread(self):
         self.app.q.put(self.close)
