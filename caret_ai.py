@@ -53,7 +53,7 @@ HOTKEY = "<ctrl>+<alt>+<space>"
 MAX_STEPS = 12          # max look -> act cycles per request
 FOCUS_CLICK = True      # click the chosen spot before typing, to give it focus back
 SAMPLE_RATE = 16000
-CONTEXT_WORDS = 100     # words read before and after the caret
+CONTEXT_CHARS = 10      # characters read before and after the caret
 SECTION_BREAKS = True   # stop reading at a blank line (treat it as the end of the section)
 AUTO_SUGGEST = True     # when the bubble opens, analyse the spot and offer next actions
 
@@ -218,7 +218,7 @@ def run_with_timeout(fn, seconds, default=None):
     return box[0]
 
 
-def read_text_context(words=CONTEXT_WORDS):
+def read_text_context(chars=CONTEXT_CHARS):
     """(before, selected, after) around the caret, read from the focused control with Windows
     UI Automation. Only the focused element (the box/div you are typing in) is read, so other
     blocks on the page are ignored. If the caret is on an empty new line/block, nothing above it
@@ -244,62 +244,58 @@ def read_text_context(words=CONTEXT_WORDS):
 
         b = caret.Clone()
         b.MoveEndpointByRange(END, caret, START)              # collapse to the caret start
-        b.MoveEndpointByUnit(START, auto.TextUnit.Word, -words)
-        before = b.GetText(8000)
+        b.MoveEndpointByUnit(START, auto.TextUnit.Character, -chars)
+        before = b.GetText(chars * 4)
         a = caret.Clone()
         a.MoveEndpointByRange(START, caret, END)              # collapse to the caret end
-        a.MoveEndpointByUnit(END, auto.TextUnit.Word, words)
-        after = a.GetText(8000)
+        a.MoveEndpointByUnit(END, auto.TextUnit.Character, chars)
+        after = a.GetText(chars * 4)
 
-    return trim_context(before, selected, after, words)
+    return trim_context(before, selected, after, chars)
 
 
-def trim_context(before, selected, after, words=CONTEXT_WORDS):
-    """Keep ~N words each side, only within the current section (a blank line ends a section)."""
+def trim_context(before, selected, after, chars=CONTEXT_CHARS):
+    """Keep N characters each side of the caret, only within the current section."""
     before, after = before.replace("\r\n", "\n"), after.replace("\r\n", "\n")
     if SECTION_BREAKS:
         before = re.split(r"\n[ \t]*\n", before)[-1]
         after = re.split(r"\n[ \t]*\n", after)[0]
-    b_words = re.findall(r"\S+\s*", before)
-    if len(b_words) > words:
-        before = "".join(b_words[-words:])
-    a_words = re.findall(r"\s*\S+", after)
-    if len(a_words) > words:
-        after = "".join(a_words[:words])
+    before, after = before[-chars:], after[:chars]
     if not (before.strip() or selected.strip() or after.strip()):
         return None
     return before, selected, after
 
 
-def read_context_by_keys(proc):
+def read_context_by_keys(proc, chars=CONTEXT_CHARS):
     """Fallback for apps that don't share their text (browser editors, Electron apps):
-    select caret->start, copy, press Right (caret goes back); select caret->end, copy, press Left.
+    Shift+Left xN, copy, Right (caret back); Shift+Right xN, copy, Left (caret back).
     Clipboard is restored. Never used in terminals, or when text is already selected."""
     if (IS_WIN and proc in TERMINALS) or not (IS_WIN or IS_MAC):
         return None
     mod = "command" if IS_MAC else "ctrl"
-    to_start = ("command", "shift", "up") if IS_MAC else ("ctrl", "shift", "home")
-    to_end = ("command", "shift", "down") if IS_MAC else ("ctrl", "shift", "end")
     try:
         old = pyperclip.paste()
     except Exception:
         old = ""
 
-    def copy_with(keys, collapse_key):
+    def copy_side(extend_key, collapse_key):
         sentinel = f"__careter_{time.time()}__"
         pyperclip.copy(sentinel)
-        pyautogui.hotkey(*keys)
+        with pyautogui.hold("shift"):
+            pyautogui.press(extend_key, presses=chars, interval=0.005)
         time.sleep(0.05)
         pyautogui.hotkey(mod, "c")
-        time.sleep(0.2)
+        time.sleep(0.15)
         text = pyperclip.paste()
-        pyautogui.press(collapse_key)        # collapse the selection back onto the caret
-        time.sleep(0.05)
-        return "" if text == sentinel else text
+        if text != sentinel and text:
+            pyautogui.press(collapse_key)    # collapse the selection back onto the caret
+            time.sleep(0.03)
+            return text
+        return ""                             # at the start/end: nothing selected, caret didn't move
 
     try:
-        before = copy_with(to_start, "right")
-        after = copy_with(to_end, "left")
+        before = copy_side("left", "right")
+        after = copy_side("right", "left")
     finally:
         pyperclip.copy(old)
     return trim_context(before, "", after)
@@ -515,8 +511,8 @@ class Session:
 
         # what was read around the caret
         if ctx and not selection:
-            n = len((ctx[0] + " " + ctx[2]).split())
-            tk.Label(box, text=f"📄 read {n} words around the caret", bg=BG, fg=MUTED, font=FONT,
+            seen = (ctx[0] + "▮" + ctx[2]).replace("\n", "⏎")
+            tk.Label(box, text=f"📄 caret: “{seen}”", bg=BG, fg=MUTED, font=FONT,
                      anchor="w").pack(fill="x", pady=(0, 4))
         elif not ctx and not selection:
             tk.Label(box, text="📷 couldn't read text here, using the screenshot", bg=BG, fg=MUTED,
