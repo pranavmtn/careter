@@ -679,7 +679,11 @@ class App:
         self.triggering = False
         self.last_trigger = 0.0
         self.root.after(30, self.pump)
-        keyboard.GlobalHotKeys({HOTKEY: self.on_hotkey}).start()
+        if IS_WIN:
+            # OS-level hotkey: exact Ctrl+Alt+Space only, never fires from normal typing or clicks
+            threading.Thread(target=windows_hotkey_loop, args=(self.on_hotkey,), daemon=True).start()
+        else:
+            keyboard.GlobalHotKeys({HOTKEY: self.on_hotkey}).start()
         print(f"Careter running ({MODEL}). Press {HOTKEY} anywhere. Ctrl+C here to quit.")
 
     def pump(self):
@@ -728,6 +732,22 @@ class App:
             self.root.mainloop()
         except KeyboardInterrupt:
             pass
+
+
+def windows_hotkey_loop(callback):
+    """Register Ctrl+Alt+Space with Windows itself (RegisterHotKey) and wait for it.
+    Unlike a keyboard hook this can't get 'stuck' thinking Ctrl/Alt are held."""
+    import ctypes
+    from ctypes import wintypes
+    user32 = ctypes.windll.user32
+    MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, VK_SPACE, WM_HOTKEY = 0x1, 0x2, 0x4000, 0x20, 0x0312
+    if not user32.RegisterHotKey(None, 1, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, VK_SPACE):
+        print("Could not register Ctrl+Alt+Space: another app is using it.")
+        return
+    msg = wintypes.MSG()
+    while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
+        if msg.message == WM_HOTKEY:
+            threading.Thread(target=callback, daemon=True).start()
 
 
 def single_instance_lock():
