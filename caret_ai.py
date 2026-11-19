@@ -54,6 +54,10 @@ FOCUS_CLICK = True      # click the chosen spot before typing, to give it focus 
 SAMPLE_RATE = 16000
 
 IS_MAC = platform.system() == "Darwin"
+IS_WIN = platform.system() == "Windows"
+# Never send Ctrl+C to these (it would interrupt the running command)
+TERMINALS = {"windowsterminal.exe", "wt.exe", "powershell.exe", "pwsh.exe", "cmd.exe",
+             "conhost.exe", "mintty.exe", "openconsole.exe", "alacritty.exe", "wezterm-gui.exe"}
 pyautogui.FAILSAFE = True   # move mouse to a screen corner to abort typing
 client = OpenAI()           # reads OPENAI_API_KEY
 
@@ -83,6 +87,9 @@ Rules:
 - Set "risky": true for anything destructive or hard to undo (deleting files, sudo, force push, killing
   processes, installing/uninstalling, sending messages, payments).
 - Set "done": true when the goal is achieved or you cannot proceed, and say why.
+- If SELECTED TEXT is given, that is what the user means by "this", "the text", "selected". To change it,
+  return ONE "type" action containing the full replacement text: typing replaces the selection. No enter.
+- If the crosshair is on empty space, use the whole screenshot (the active window) to find the context.
 - Never pretend to see output that is not on screen. Keep each turn's action list short.
 """
 
@@ -138,8 +145,68 @@ def paste(text):
     pyperclip.copy(old)
 
 
-def run_actions(actions, anchor):
-    if FOCUS_CLICK:
+def wait_for_hotkey_release(timeout=1.5):
+    """Don't send keys while the user still holds Ctrl+Alt+Space."""
+    if IS_WIN:
+        import ctypes
+        user32 = ctypes.windll.user32
+        end = time.time() + timeout
+        while time.time() < end and any(user32.GetAsyncKeyState(vk) & 0x8000 for vk in (0x11, 0x12, 0x20)):
+            time.sleep(0.02)
+        time.sleep(0.05)
+    else:
+        time.sleep(0.4)
+
+
+def foreground_window():
+    """(window handle, process name) of the app the user is in. Windows only."""
+    if not IS_WIN:
+        return None, ""
+    import ctypes
+    from ctypes import wintypes
+    user32, kernel32 = ctypes.windll.user32, ctypes.windll.kernel32
+    hwnd = user32.GetForegroundWindow()
+    pid = wintypes.DWORD()
+    user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+    name = ""
+    handle = kernel32.OpenProcess(0x1000, False, pid.value)
+    if handle:
+        buf, size = ctypes.create_unicode_buffer(260), wintypes.DWORD(260)
+        if kernel32.QueryFullProcessImageNameW(handle, 0, buf, ctypes.byref(size)):
+            name = os.path.basename(buf.value).lower()
+        kernel32.CloseHandle(handle)
+    return hwnd, name
+
+
+def focus_window(hwnd):
+    import ctypes
+    user32 = ctypes.windll.user32
+    if user32.IsIconic(hwnd):
+        user32.ShowWindow(hwnd, 9)
+    user32.SetForegroundWindow(hwnd)
+
+
+def grab_selection(proc):
+    """Copy the current selection via the clipboard, then restore the clipboard. '' if nothing selected."""
+    if IS_WIN and proc in TERMINALS:
+        return ""
+    if not (IS_WIN or IS_MAC):      # on Linux Ctrl+C in a terminal would kill the command
+        return ""
+    try:
+        old = pyperclip.paste()
+    except Exception:
+        old = ""
+    sentinel = f"__careter_{time.time()}__"
+    pyperclip.copy(sentinel)
+    pyautogui.hotkey("command" if IS_MAC else "ctrl", "c")
+    time.sleep(0.3)
+    selected = pyperclip.paste()
+    pyperclip.copy(old)
+    return "" if selected == sentinel else selected
+
+
+def run_actions(actions, anchor, click_to_focus=FOCUS_CLICK):
+    if click_to_focus:
         pyautogui.click(*anchor)
         time.sleep(0.25)
     for a in actions:
@@ -228,8 +295,9 @@ class Recorder:
 class Session:
     """One popup at one spot. Keeps conversation history so you can give follow-ups."""
 
-    def __init__(self, app, anchor, shot):
+    def __init__(self, app, anchor, shot, hwnd=None, proc="", selection=""):
         self.app, self.anchor, self.shot = app, anchor, shot
+        self.hwnd, self.proc, self.selection = hwnd, proc, selection
         self.msgs = [{"role": "system", "content": SYSTEM}]
         self.busy = False
         self.recorder = Recorder()
@@ -264,6 +332,9 @@ class Session:
         self.mic_btn.pack(side="left", padx=4)
         tk.Button(bar, text="Go", command=self.submit).pack(side="left")
 
+        if selection:
+            preview = selection.strip().replace("\n", " ")
+            self.write(f"Selected: {preview[:120]}{'…' if len(preview) > 120 else ''}", "act")
         self.write("Tell me what to do here (type or 🎤).", "act")
         win.after(50, lambda: (win.focus_force(), self.entry.focus_set()))
 
@@ -337,12 +408,19 @@ class Session:
                 self.show()
             for step in range(MAX_STEPS):
                 strip_old_images(self.msgs)
-                text = f"Goal: {goal}" if step == 0 else "Screen after your actions. Continue toward the goal."
+                if step == 0:
+                    text = f"Goal: {goal}"
+                    if self.proc:
+                        text += f"\nActive app: {self.proc}"
+                    if self.selection:
+                        text += f'\nSELECTED TEXT:\n"""\n{self.selection}\n"""'
+                else:
+                    text = "Screen after your actions. Continue toward the goal."
                 full, crop = self.shot
                 self.msgs.append({"role": "user", "content": [
                     {"type": "text", "text": text},
-                    {"type": "image_url", "image_url": {"url": full}},
-                    {"type": "image_url", "image_url": {"url": crop}},
+                    {"type": "image_url", "image_url": {"url": full, "detail": "high"}},
+                    {"type": "image_url", "image_url": {"url": crop, "detail": "high"}},
                 ]})
                 self.write("Thinking…", "act")
                 resp = client.chat.completions.create(model=MODEL, messages=self.msgs)
@@ -363,7 +441,11 @@ class Session:
                     break
 
                 self.hide()
-                run_actions(actions, self.anchor)
+                # Windows: refocus the original window (keeps the selection). Elsewhere: click the spot,
+                # unless there is a selection a click would destroy.
+                run_actions(actions, self.anchor,
+                            click_to_focus=FOCUS_CLICK and not self.hwnd and not self.selection)
+                self.selection = ""      # it has been replaced/used
                 self.shot = capture(self.anchor)
                 self.show()
                 if reply.get("done"):
@@ -381,7 +463,15 @@ class Session:
 
     def hide(self):
         done = threading.Event()
-        self.ui(lambda: (self.win.withdraw(), done.set()))
+        def _hide():
+            if self.hwnd:            # give focus back while we still own the foreground
+                try:
+                    focus_window(self.hwnd)
+                except Exception:
+                    pass
+            self.win.withdraw()
+            done.set()
+        self.ui(_hide)
         done.wait()
         time.sleep(0.25)
 
@@ -415,9 +505,12 @@ class App:
         self.root.after(30, self.pump)
 
     def on_hotkey(self):
+        wait_for_hotkey_release()
         anchor = pyautogui.position()
+        hwnd, proc = foreground_window()
+        selection = grab_selection(proc)
         shot = capture(anchor)    # screenshot before the popup appears
-        self.q.put(lambda: Session(self, anchor, shot))
+        self.q.put(lambda: Session(self, anchor, shot, hwnd, proc, selection))
 
     def run(self):
         try:
