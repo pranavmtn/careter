@@ -13,7 +13,21 @@ An AI that lives at your cursor. Point at any spot on screen (a terminal, an ebo
 
 **Esc** closes the popup. Moving the mouse into a screen corner aborts typing.
 
-## Setup
+## Install (one command)
+
+These clone Careter into your home folder, install dependencies, ask for your OpenAI key (saved to `careter/.env`), and set it to start at login.
+
+**Windows** (PowerShell):
+```powershell
+irm https://raw.githubusercontent.com/pranavmtn/careter/main/install.ps1 | iex
+```
+
+**macOS / Linux:**
+```bash
+curl -fsSL https://raw.githubusercontent.com/pranavmtn/careter/main/install.sh | bash
+```
+
+## Manual setup
 
 ```bash
 pip install -r requirements.txt

@@ -33,6 +33,19 @@ from PIL import Image, ImageDraw
 from pynput import keyboard
 
 # ---------------------------------------------------------------- settings
+def load_env_file():
+    """Read KEY=VALUE lines from a .env next to this script (written by the installers)."""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+    if os.path.exists(path):
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    k, v = line.split("=", 1)
+                    os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
+
+
+load_env_file()
 MODEL = os.getenv("CARET_AI_MODEL", "gpt-6-luna")
 TRANSCRIBE_MODEL = os.getenv("CARET_AI_STT", "whisper-1")
 HOTKEY = "<ctrl>+<alt>+<space>"

@@ -1,0 +1,37 @@
+# Careter installer for Windows. In PowerShell:
+#   irm https://raw.githubusercontent.com/pranavmtn/careter/main/install.ps1 | iex
+$ErrorActionPreference = "Stop"
+
+$Dir  = Join-Path $env:USERPROFILE "careter"
+$Repo = "https://github.com/pranavmtn/careter"
+
+if (-not (Get-Command git -ErrorAction SilentlyContinue))    { Write-Host "Please install Git first: winget install Git.Git"; return }
+if (-not (Get-Command python -ErrorAction SilentlyContinue)) { Write-Host "Please install Python 3.10+ first: winget install Python.Python.3.12"; return }
+
+if (Test-Path (Join-Path $Dir ".git")) { git -C $Dir pull --ff-only }
+else { git clone $Repo $Dir }
+
+Set-Location $Dir
+python -m venv .venv
+& "$Dir\.venv\Scripts\python.exe" -m pip install --upgrade pip | Out-Null
+& "$Dir\.venv\Scripts\python.exe" -m pip install -r requirements.txt
+
+$EnvFile = Join-Path $Dir ".env"
+if (-not ((Test-Path $EnvFile) -and (Select-String -Path $EnvFile -Pattern "OPENAI_API_KEY" -Quiet))) {
+    $Key = Read-Host "Paste your OpenAI API key"
+    Add-Content -Path $EnvFile -Value "OPENAI_API_KEY=$Key"
+}
+
+# Start at login, without a console window
+$PyW = "$Dir\.venv\Scripts\pythonw.exe"
+$Startup = [Environment]::GetFolderPath("Startup")
+$Shell = New-Object -ComObject WScript.Shell
+$Lnk = $Shell.CreateShortcut((Join-Path $Startup "Careter.lnk"))
+$Lnk.TargetPath = $PyW
+$Lnk.Arguments = "`"$Dir\caret_ai.py`""
+$Lnk.WorkingDirectory = $Dir
+$Lnk.Save()
+
+Start-Process $PyW -ArgumentList "`"$Dir\caret_ai.py`"" -WorkingDirectory $Dir
+Write-Host ""
+Write-Host "Careter installed and set to start at login. Press Ctrl+Alt+Space anywhere."
