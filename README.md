@@ -13,6 +13,14 @@ An AI that lives at your cursor. Point at any spot on screen (a terminal, an ebo
 
 **Esc** closes the popup. Moving the mouse into a screen corner aborts typing.
 
+## What it reads
+
+- **Text around the caret:** up to 100 words before and after it (Windows UI Automation), only inside the focused box/div and only within the current section (stops at a blank line). If the caret is on an empty new line/block, nothing above is read.
+- **Selection:** whatever you have selected.
+- **Screenshot:** a zoomed crop around the spot (plus the full screen when the app doesn't expose its text).
+
+When the bubble opens it first says what it sees and offers 2–4 one-click next actions; you can also type or speak your own. Settings (`CONTEXT_WORDS`, `SECTION_BREAKS`, `AUTO_SUGGEST`) are at the top of `caret_ai.py`.
+
 ## Install (one command)
 
 These clone Careter into your home folder, install dependencies, ask for your OpenAI key (saved to `careter/.env`), and set it to start at login.

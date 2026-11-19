@@ -53,6 +53,9 @@ HOTKEY = "<ctrl>+<alt>+<space>"
 MAX_STEPS = 12          # max look -> act cycles per request
 FOCUS_CLICK = True      # click the chosen spot before typing, to give it focus back
 SAMPLE_RATE = 16000
+CONTEXT_WORDS = 100     # words read before and after the caret
+SECTION_BREAKS = True   # stop reading at a blank line (treat it as the end of the section)
+AUTO_SUGGEST = True     # when the bubble opens, analyse the spot and offer next actions
 
 IS_MAC = platform.system() == "Darwin"
 IS_WIN = platform.system() == "Windows"
@@ -61,6 +64,14 @@ TERMINALS = {"windowsterminal.exe", "wt.exe", "powershell.exe", "pwsh.exe", "cmd
              "conhost.exe", "mintty.exe", "openconsole.exe", "alacritty.exe", "wezterm-gui.exe"}
 pyautogui.FAILSAFE = True   # move mouse to a screen corner to abort typing
 client = OpenAI()           # reads OPENAI_API_KEY
+
+SUGGEST_SYSTEM = """You help a user who just called an assistant at their text caret.
+You get the text around the caret ("▮" marks the caret, [[ ]] marks a selection; this is only the
+section the caret is in) and/or a zoomed screenshot of that spot.
+1. In one short line, say what this is (e.g. "Bullet list of essay topics", "PowerShell after a failed pip install").
+2. Offer 2-4 next actions the user most likely wants right here, as button labels of at most 5 words
+   (e.g. "Fix grammar", "Continue writing", "Explain this", "Fix the error").
+Reply ONLY with JSON: {"summary": "...", "suggestions": ["...", "..."]}"""
 
 SYSTEM = f"""You are Caret AI, an assistant that lives at the user's pointer on their {platform.system()} desktop.
 Each turn you receive the user's goal, a screenshot with a RED CROSSHAIR at the spot the user chose,
@@ -88,6 +99,8 @@ Rules:
 - Set "risky": true for anything destructive or hard to undo (deleting files, sudo, force push, killing
   processes, installing/uninstalling, sending messages, payments).
 - Set "done": true when the goal is achieved or you cannot proceed, and say why.
+- TEXT AROUND CARET (if given) is the section the user is working in: "▮" marks the caret and
+  [[ ]] marks the selection. Prefer it over reading the screenshot; use the screenshot for layout.
 - If SELECTED TEXT is given, that is what the user means by "this", "the text", "selected". To change it,
   return ONE "type" action containing the full replacement text: typing replaces the selection. No enter.
 - If the crosshair is on empty space, use the whole screenshot (the active window) to find the context.
@@ -177,6 +190,68 @@ def foreground_window():
             name = os.path.basename(buf.value).lower()
         kernel32.CloseHandle(handle)
     return hwnd, name
+
+
+def run_with_timeout(fn, seconds, default=None):
+    """UI Automation can hang on a frozen app; never let it block the hotkey."""
+    box = [default]
+
+    def target():
+        try:
+            box[0] = fn()
+        except Exception:
+            pass
+    t = threading.Thread(target=target, daemon=True)
+    t.start()
+    t.join(seconds)
+    return box[0]
+
+
+def read_text_context(words=CONTEXT_WORDS):
+    """(before, selected, after) around the caret, read from the focused control with Windows
+    UI Automation. Only the focused element (the box/div you are typing in) is read, so other
+    blocks on the page are ignored. If the caret is on an empty new line/block, nothing above it
+    is read. Returns None when the app doesn't expose its text (then we rely on the screenshot)."""
+    if not IS_WIN:
+        return None
+    import uiautomation as auto
+    with auto.UIAutomationInitializerInThread():
+        ctrl = auto.GetFocusedControl()
+        tp = ctrl.GetPattern(auto.PatternId.TextPattern) if ctrl else None
+        sel = tp.GetSelection() if tp else None
+        if not sel:
+            return None
+        caret = sel[0]
+        START, END = auto.TextPatternRangeEndpoint.Start, auto.TextPatternRangeEndpoint.End
+        selected = caret.GetText(4000)
+
+        block = caret.Clone()
+        block.ExpandToEnclosingUnit(auto.TextUnit.Paragraph)
+        new_block = not selected.strip() and not block.GetText(2000).strip()
+
+        before = ""
+        if not new_block:
+            b = caret.Clone()
+            b.MoveEndpointByRange(END, caret, START)          # collapse to the caret start
+            b.MoveEndpointByUnit(START, auto.TextUnit.Word, -words)
+            before = b.GetText(8000)
+        a = caret.Clone()
+        a.MoveEndpointByRange(START, caret, END)              # collapse to the caret end
+        a.MoveEndpointByUnit(END, auto.TextUnit.Word, words)
+        after = a.GetText(8000)
+
+    if SECTION_BREAKS:
+        before = re.split(r"\n[ \t]*\n", before)[-1]          # only this section
+        after = re.split(r"\n[ \t]*\n", after)[0]
+    if not (before.strip() or selected.strip() or after.strip()):
+        return None
+    return before, selected, after
+
+
+def format_context(ctx):
+    before, selected, after = ctx
+    middle = f"[[{selected}]]" if selected else "▮"
+    return f"{before}{middle}{after}"
 
 
 def caret_rect():
@@ -350,9 +425,9 @@ WRAP = 380
 class Session:
     """A small tooltip bubble at the caret/selection. Keeps history so you can ask follow-ups."""
 
-    def __init__(self, app, anchor, below_y, bounds, shot, hwnd=None, proc="", selection=""):
+    def __init__(self, app, anchor, below_y, bounds, shot, hwnd=None, proc="", selection="", ctx=None):
         self.app, self.anchor, self.below_y, self.bounds, self.shot = app, anchor, below_y, bounds, shot
-        self.hwnd, self.proc, self.selection = hwnd, proc, selection
+        self.hwnd, self.proc, self.selection, self.ctx = hwnd, proc, selection, ctx
         self.msgs = [{"role": "system", "content": SYSTEM}]
         self.busy = False
         self.alive = True
@@ -409,12 +484,17 @@ class Session:
         self.confirm_label.pack(side="left")
         self.button(self.confirm, "Stop", lambda: self.decide(False), FIELD).pack(side="right")
         self.button(self.confirm, "Run ⏎", lambda: self.decide(True), ACCENT).pack(side="right", padx=4)
+        self.summary = tk.Label(box, bg=BG, fg=MUTED, font=FONT, anchor="w", justify="left", wraplength=WRAP)
+        self.chips = tk.Frame(box, bg=BG)
         self.tools = tk.Frame(box, bg=BG)
         self.button(self.tools, "Copy", self.copy_answer, FIELD).pack(side="left")
         self.button(self.tools, "Insert", self.insert_answer, FIELD).pack(side="left", padx=4)
 
         self.place()
         win.after(30, self.grab_focus)
+        if AUTO_SUGGEST:
+            self.set_status("Reading…")
+            threading.Thread(target=self.suggest, daemon=True).start()
         if IS_WIN:
             win.after(400, self.watch)
 
@@ -541,6 +621,48 @@ class Session:
     def set_steps(self, text, risky=False):
         self.ui(lambda: self.show_part(self.steps, text, fg=RED if risky else MUTED))
 
+    # --- analyse the spot and offer next actions
+    def suggest(self):
+        content = []
+        if self.ctx:
+            content.append({"type": "text", "text": "TEXT AROUND CARET:\n" + format_context(self.ctx)})
+        content.append({"type": "image_url", "image_url": {"url": self.shot[1], "detail": "high"}})
+        if not self.ctx:   # no text from the app: give the whole screen too
+            content.append({"type": "image_url", "image_url": {"url": self.shot[0], "detail": "high"}})
+        try:
+            resp = client.chat.completions.create(model=MODEL, messages=[
+                {"role": "system", "content": SUGGEST_SYSTEM}, {"role": "user", "content": content}])
+            data = parse_reply(resp.choices[0].message.content)
+        except Exception as e:
+            self.set_status(f"Error: {e}", RED)
+            return
+        if self.busy or len(self.msgs) > 1:
+            return                    # the user already asked something
+        self.set_status("")
+        self.ui(lambda: self.show_suggestions(data.get("summary", ""), data.get("suggestions") or []))
+
+    def show_suggestions(self, summary, suggestions):
+        self.show_part(self.summary, summary)
+        for child in self.chips.winfo_children():
+            child.destroy()
+        for text in suggestions[:4]:
+            chip = self.button(self.chips, text, lambda t=text: self.ask(t), FIELD)
+            chip.pack(side="left", padx=(0, 4), pady=2)
+        if suggestions:
+            self.chips.pack(anchor="w", pady=(6, 0))
+        self.place()
+
+    def hide_suggestions(self):
+        self.summary.pack_forget()
+        self.chips.pack_forget()
+        self.place()
+
+    def ask(self, text):
+        self.clear_placeholder()
+        self.entry.delete(0, "end")
+        self.entry.insert(0, text)
+        self.submit()
+
     # --- input
     def toggle_mic(self):
         if self.recorder.stream is None:
@@ -570,6 +692,7 @@ class Session:
             return
         self.entry.delete(0, "end")
         self.busy = True
+        self.hide_suggestions()
         self.set_answer("")
         self.set_steps("")
         threading.Thread(target=self.agent, args=(goal,), daemon=True).start()
@@ -632,6 +755,8 @@ class Session:
                     text = f"Goal: {goal}"
                     if self.proc:
                         text += f"\nActive app: {self.proc}"
+                    if self.ctx:
+                        text += "\nTEXT AROUND CARET (this section only):\n" + format_context(self.ctx)
                     if self.selection:
                         text += f'\nSELECTED TEXT:\n"""\n{self.selection}\n"""'
                 else:
@@ -669,6 +794,7 @@ class Session:
                 run_actions(actions, self.anchor,
                             click_to_focus=FOCUS_CLICK and not self.hwnd and not self.selection)
                 self.selection = ""      # it has been replaced/used
+                self.ctx = None
                 self.shot = capture(self.anchor)
                 self.show()
                 if reply.get("done"):
@@ -777,9 +903,11 @@ class App:
             else:
                 anchor, below_y = (mouse[0], mouse[1]), mouse[1] + 16
             bounds = monitor_bounds(*anchor)
-            selection = grab_selection(proc)
+            ctx = run_with_timeout(read_text_context, 1.5)
+            # UI Automation gives the selection directly; only fall back to Ctrl+C when it can't
+            selection = ctx[1] if ctx else grab_selection(proc)
             shot = capture(anchor)
-            self.q.put(lambda: self.open(anchor, below_y, bounds, shot, hwnd, proc, selection))
+            self.q.put(lambda: self.open(anchor, below_y, bounds, shot, hwnd, proc, selection, ctx))
         finally:
             self.triggering = False
 

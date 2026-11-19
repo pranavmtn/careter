@@ -6,3 +6,4 @@ mss
 pillow
 numpy
 sounddevice
+uiautomation; sys_platform == "win32"
