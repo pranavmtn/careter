@@ -16,12 +16,13 @@ import os
 import platform
 import queue
 import re
+import socket
+import sys
 import tempfile
 import threading
 import time
 import wave
 import tkinter as tk
-from tkinter import scrolledtext
 
 import mss
 import numpy as np
@@ -178,6 +179,43 @@ def foreground_window():
     return hwnd, name
 
 
+def caret_rect():
+    """Screen rect (left, top, bottom) of the text caret in the active app, or None. Windows only;
+    many apps (browsers, Electron) don't expose a caret, so callers fall back to the mouse."""
+    if not IS_WIN:
+        return None
+    import ctypes
+    from ctypes import wintypes
+
+    class GUITHREADINFO(ctypes.Structure):
+        _fields_ = [("cbSize", wintypes.DWORD), ("flags", wintypes.DWORD),
+                    ("hwndActive", wintypes.HWND), ("hwndFocus", wintypes.HWND),
+                    ("hwndCapture", wintypes.HWND), ("hwndMenuOwner", wintypes.HWND),
+                    ("hwndMoveSize", wintypes.HWND), ("hwndCaret", wintypes.HWND),
+                    ("rcCaret", wintypes.RECT)]
+    user32 = ctypes.windll.user32
+    info = GUITHREADINFO(cbSize=ctypes.sizeof(GUITHREADINFO))
+    tid = user32.GetWindowThreadProcessId(user32.GetForegroundWindow(), None)
+    if not user32.GetGUIThreadInfo(tid, ctypes.byref(info)) or not info.hwndCaret:
+        return None
+    r = info.rcCaret
+    if r.bottom - r.top <= 0:
+        return None
+    top_left = wintypes.POINT(r.left, r.top)
+    bottom = wintypes.POINT(r.left, r.bottom)
+    user32.ClientToScreen(info.hwndCaret, ctypes.byref(top_left))
+    user32.ClientToScreen(info.hwndCaret, ctypes.byref(bottom))
+    return top_left.x, top_left.y, bottom.y
+
+
+def monitor_bounds(x, y):
+    with mss.mss() as sct:
+        m = next((m for m in sct.monitors[1:]
+                  if m["left"] <= x < m["left"] + m["width"] and m["top"] <= y < m["top"] + m["height"]),
+                 sct.monitors[1])
+    return m["left"], m["top"], m["left"] + m["width"], m["top"] + m["height"]
+
+
 def focus_window(hwnd):
     import ctypes
     user32 = ctypes.windll.user32
@@ -291,113 +329,245 @@ class Recorder:
             os.remove(path)
 
 
-# ---------------------------------------------------------------- UI
-class Session:
-    """One popup at one spot. Keeps conversation history so you can give follow-ups."""
+# ---------------------------------------------------------------- UI (tooltip bubble)
+BG, FIELD, FG, MUTED, ACCENT, RED = "#1e1b2e", "#2a2640", "#f4f4f5", "#a1a1aa", "#8b5cf6", "#f87171"
+FONT = ("Segoe UI", 10) if IS_WIN else ("Helvetica", 12)
+FONT_B = (FONT[0], FONT[1], "bold")
+WRAP = 380
 
-    def __init__(self, app, anchor, shot, hwnd=None, proc="", selection=""):
-        self.app, self.anchor, self.shot = app, anchor, shot
+
+class Session:
+    """A small tooltip bubble at the caret/selection. Keeps history so you can ask follow-ups."""
+
+    def __init__(self, app, anchor, below_y, bounds, shot, hwnd=None, proc="", selection=""):
+        self.app, self.anchor, self.below_y, self.bounds, self.shot = app, anchor, below_y, bounds, shot
         self.hwnd, self.proc, self.selection = hwnd, proc, selection
         self.msgs = [{"role": "system", "content": SYSTEM}]
         self.busy = False
+        self.alive = True
+        self.last_answer = ""
         self.recorder = Recorder()
         self.decision = None
         self.decided = threading.Event()
+        self.moved = False
 
         win = self.win = tk.Toplevel(app.root)
-        win.title("Caret AI")
+        win.overrideredirect(True)                 # no title bar: looks like a tooltip
         win.attributes("-topmost", True)
-        win.geometry(f"460x320+{anchor[0] + 20}+{anchor[1] + 20}")
-        win.bind("<Escape>", lambda e: self.close())
+        win.configure(bg=ACCENT)                   # 1px accent border
+        win.bind("<Escape>", lambda e: self.escape())
+        box = self.box = tk.Frame(win, bg=BG, padx=8, pady=6)
+        box.pack(padx=1, pady=1)
 
-        self.log = scrolledtext.ScrolledText(win, height=10, wrap="word", font=("Helvetica", 11))
-        self.log.pack(fill="both", expand=True, padx=8, pady=(8, 4))
-        self.log.tag_config("you", foreground="#2563eb")
-        self.log.tag_config("act", foreground="#555555")
-        self.log.tag_config("risky", foreground="#dc2626")
-        self.log.configure(state="disabled")
-
-        self.confirm_bar = tk.Frame(win)
-        self.confirm_label = tk.Label(self.confirm_bar, text="Run these actions?")
-        self.confirm_label.pack(side="left")
-        tk.Button(self.confirm_bar, text="Stop", command=lambda: self.decide(False)).pack(side="right")
-        tk.Button(self.confirm_bar, text="Run ⏎", command=lambda: self.decide(True)).pack(side="right", padx=4)
-
-        bar = self.input_bar = tk.Frame(win)
-        bar.pack(fill="x", padx=8, pady=(0, 8))
-        self.entry = tk.Entry(bar, font=("Helvetica", 12))
-        self.entry.pack(side="left", fill="x", expand=True)
-        self.entry.bind("<Return>", lambda e: self.submit())
-        self.mic_btn = tk.Button(bar, text="🎤", width=3, command=self.toggle_mic)
-        self.mic_btn.pack(side="left", padx=4)
-        tk.Button(bar, text="Go", command=self.submit).pack(side="left")
-
+        # selection chip
         if selection:
-            preview = selection.strip().replace("\n", " ")
-            self.write(f"Selected: {preview[:120]}{'…' if len(preview) > 120 else ''}", "act")
-        self.write("Tell me what to do here (type or 🎤).", "act")
-        win.after(50, lambda: (win.focus_force(), self.entry.focus_set()))
+            preview = " ".join(selection.split())
+            preview = preview[:60] + ("…" if len(preview) > 60 else "")
+            tk.Label(box, text=f"✎ “{preview}”", bg=BG, fg=MUTED, font=FONT, anchor="w",
+                     justify="left", wraplength=WRAP).pack(fill="x", pady=(0, 4))
 
-    # --- thread-safe helpers (agent thread -> UI thread)
+        # input row
+        row = tk.Frame(box, bg=BG)
+        row.pack(fill="x")
+        handle = tk.Label(row, text="✦", bg=BG, fg=ACCENT, font=FONT_B, cursor="fleur")
+        handle.pack(side="left", padx=(0, 6))
+        handle.bind("<ButtonPress-1>", self.drag_start)
+        handle.bind("<B1-Motion>", self.drag_move)
+        self.entry = tk.Entry(row, bg=FIELD, fg=FG, insertbackground=FG, relief="flat",
+                              font=FONT, width=34, highlightthickness=0)
+        self.entry.pack(side="left", fill="x", expand=True, ipady=4)
+        self.entry.bind("<Return>", lambda e: self.submit())
+        self.placeholder = "Ask about the selection…" if selection else "What should I do here?"
+        self.set_placeholder()
+        self.entry.bind("<FocusIn>", lambda e: self.clear_placeholder())
+        self.entry.bind("<Key>", lambda e: self.clear_placeholder())
+        self.mic = self.icon(row, "🎤", self.toggle_mic)
+        self.icon(row, "✕", self.close)
+
+        # body (hidden until there is something to show)
+        self.status = tk.Label(box, bg=BG, fg=MUTED, font=FONT, anchor="w")
+        self.answer = tk.Label(box, bg=BG, fg=FG, font=FONT, anchor="w", justify="left", wraplength=WRAP)
+        self.steps = tk.Label(box, bg=BG, fg=MUTED, font=("Consolas", 9) if IS_WIN else ("Menlo", 11),
+                              anchor="w", justify="left", wraplength=WRAP)
+        self.confirm = tk.Frame(box, bg=BG)
+        self.confirm_label = tk.Label(self.confirm, bg=BG, fg=MUTED, font=FONT)
+        self.confirm_label.pack(side="left")
+        self.button(self.confirm, "Stop", lambda: self.decide(False), FIELD).pack(side="right")
+        self.button(self.confirm, "Run ⏎", lambda: self.decide(True), ACCENT).pack(side="right", padx=4)
+        self.tools = tk.Frame(box, bg=BG)
+        self.button(self.tools, "Copy", self.copy_answer, FIELD).pack(side="left")
+        self.button(self.tools, "Insert", self.insert_answer, FIELD).pack(side="left", padx=4)
+
+        self.place()
+        win.after(30, self.grab_focus)
+
+    # --- widgets
+    def icon(self, parent, text, cmd):
+        lbl = tk.Label(parent, text=text, bg=BG, fg=MUTED, font=FONT, cursor="hand2", padx=4)
+        lbl.pack(side="left")
+        lbl.bind("<Button-1>", lambda e: cmd())
+        return lbl
+
+    def button(self, parent, text, cmd, bg):
+        b = tk.Label(parent, text=text, bg=bg, fg=FG, font=FONT, padx=10, pady=2, cursor="hand2")
+        b.bind("<Button-1>", lambda e: cmd())
+        return b
+
+    def set_placeholder(self):
+        self.entry.delete(0, "end")
+        self.entry.insert(0, self.placeholder)
+        self.entry.configure(fg=MUTED)
+        self.has_placeholder = True
+
+    def clear_placeholder(self):
+        if self.has_placeholder:
+            self.entry.delete(0, "end")
+            self.entry.configure(fg=FG)
+            self.has_placeholder = False
+
+    def grab_focus(self):
+        self.win.lift()
+        self.win.focus_force()
+        self.entry.focus_set()
+        self.entry.icursor("end")
+
+    # --- placement: just under the caret/selection, kept on screen
+    def place(self):
+        self.win.update_idletasks()
+        w, h = self.win.winfo_reqwidth(), self.win.winfo_reqheight()
+        left, top, right, bottom = self.bounds
+        if self.moved:
+            x, y = self.win.winfo_x(), self.win.winfo_y()
+        else:
+            x = self.anchor[0] - 12
+            y = self.below_y + 8
+            if y + h > bottom - 8:                       # no room below: go above
+                y = self.anchor[1] - h - 24
+        x = max(left + 8, min(x, right - w - 8))
+        y = max(top + 8, min(y, bottom - h - 8))
+        self.win.geometry(f"+{int(x)}+{int(y)}")
+
+    def drag_start(self, e):
+        self.drag = (e.x_root - self.win.winfo_x(), e.y_root - self.win.winfo_y())
+
+    def drag_move(self, e):
+        self.moved = True
+        self.win.geometry(f"+{e.x_root - self.drag[0]}+{e.y_root - self.drag[1]}")
+
+    def move_to(self, anchor, below_y, bounds):
+        self.anchor, self.below_y, self.bounds, self.moved = anchor, below_y, bounds, False
+        self.place()
+        self.grab_focus()
+
+    # --- thread-safe UI updates (agent thread -> UI thread)
     def ui(self, fn):
-        self.app.q.put(fn)
+        def safe():
+            if self.alive:
+                fn()
+        self.app.q.put(safe)
 
-    def write(self, text, tag=None):
-        def _w():
-            self.log.configure(state="normal")
-            self.log.insert("end", text + "\n", tag)
-            self.log.see("end")
-            self.log.configure(state="disabled")
-        self.ui(_w)
+    def show_part(self, widget, text=None, **cfg):
+        if text is not None:
+            widget.configure(text=text, **cfg)
+        if text:
+            widget.pack(fill="x", pady=(6, 0))
+        else:
+            widget.pack_forget()
+        self.place()
+
+    def set_status(self, text, color=MUTED):
+        self.ui(lambda: self.show_part(self.status, text, fg=color))
+
+    def set_answer(self, text):
+        self.last_answer = text
+        def _a():
+            self.show_part(self.answer, text)
+            self.tools.pack_forget()
+            if text:
+                self.tools.pack(anchor="w", pady=(6, 0))
+            self.place()
+        self.ui(_a)
+
+    def set_steps(self, text, risky=False):
+        self.ui(lambda: self.show_part(self.steps, text, fg=RED if risky else MUTED))
 
     # --- input
     def toggle_mic(self):
         if self.recorder.stream is None:
             self.recorder.start()
-            self.mic_btn.configure(text="■")
-            self.write("Listening… click ■ to stop.", "act")
+            self.mic.configure(text="■", fg=RED)
+            self.set_status("Listening… click ■ to stop")
         else:
-            self.mic_btn.configure(text="…")
+            self.mic.configure(text="…", fg=MUTED)
 
             def work():
                 try:
                     text = self.recorder.stop_and_transcribe()
                 except Exception as e:
-                    self.write(f"Mic error: {e}", "risky")
+                    self.set_status(f"Mic error: {e}", RED)
                     text = ""
-                self.ui(lambda: self.mic_btn.configure(text="🎤"))
+                self.ui(lambda: self.mic.configure(text="🎤"))
                 if text.strip():
-                    self.ui(lambda: (self.entry.delete(0, "end"), self.entry.insert(0, text), self.submit()))
+                    self.ui(lambda: (self.clear_placeholder(), self.entry.delete(0, "end"),
+                                     self.entry.insert(0, text), self.submit()))
+                else:
+                    self.set_status("")
             threading.Thread(target=work, daemon=True).start()
 
     def submit(self):
-        goal = self.entry.get().strip()
+        goal = "" if self.has_placeholder else self.entry.get().strip()
         if not goal or self.busy:
             return
         self.entry.delete(0, "end")
-        self.write(f"You: {goal}", "you")
         self.busy = True
+        self.set_answer("")
+        self.set_steps("")
         threading.Thread(target=self.agent, args=(goal,), daemon=True).start()
 
+    def copy_answer(self):
+        pyperclip.copy(self.last_answer)
+        self.set_status("Copied ✓")
+
+    def insert_answer(self):
+        if self.busy or not self.last_answer:
+            return
+        text = self.last_answer
+
+        def work():
+            self.hide()
+            run_actions([{"type": "type", "text": text}], self.anchor,
+                        click_to_focus=FOCUS_CLICK and not self.hwnd and not self.selection)
+            self.selection = ""
+            self.close_from_thread()
+        threading.Thread(target=work, daemon=True).start()
+
     # --- confirmation
-    def ask_confirm(self, actions, risky):
+    def ask_confirm(self, risky):
         self.decided.clear()
 
         def show():
-            self.confirm_label.configure(text="⚠ Risky — run these?" if risky else "Run these actions?",
-                                         fg="#dc2626" if risky else "black")
-            self.confirm_bar.pack(fill="x", padx=8, pady=(0, 4), before=self.input_bar)
+            self.confirm_label.configure(text="⚠ Risky. Run?" if risky else "Run these?",
+                                         fg=RED if risky else MUTED)
+            self.confirm.pack(fill="x", pady=(6, 0))
+            self.place()
             self.win.bind("<Return>", lambda e: self.decide(True))
-            self.win.focus_force()
+            self.grab_focus()
         self.ui(show)
         self.decided.wait()
         return self.decision
 
     def decide(self, ok):
         self.decision = ok
-        self.confirm_bar.pack_forget()
+        self.confirm.pack_forget()
         self.win.unbind("<Return>")
+        self.place()
         self.decided.set()
+
+    def escape(self):
+        if self.confirm.winfo_ismapped():
+            self.decide(False)
+        else:
+            self.close()
 
     # --- the loop: look -> think -> confirm -> act -> look again
     def agent(self, goal):
@@ -422,24 +592,27 @@ class Session:
                     {"type": "image_url", "image_url": {"url": full, "detail": "high"}},
                     {"type": "image_url", "image_url": {"url": crop, "detail": "high"}},
                 ]})
-                self.write("Thinking…", "act")
+                self.set_status("Thinking…")
                 resp = client.chat.completions.create(model=MODEL, messages=self.msgs)
                 raw = resp.choices[0].message.content
                 self.msgs.append({"role": "assistant", "content": raw})
                 reply = parse_reply(raw)
+                self.set_status("")
 
-                if reply.get("say"):
-                    self.write(f"AI: {reply['say']}")
                 actions = reply.get("actions") or []
                 if not actions:
+                    self.set_steps("")
+                    self.set_answer(reply.get("say", ""))
                     break
                 risky = bool(reply.get("risky"))
-                for a in actions:
-                    self.write("   • " + describe(a), "risky" if risky else "act")
-                if not self.ask_confirm(actions, risky):
-                    self.write("Stopped.", "act")
+                self.ui(lambda r=reply: self.show_part(self.answer, r.get("say", "")))
+                self.set_steps("\n".join("› " + describe(a) for a in actions), risky)
+                if not self.ask_confirm(risky):
+                    self.set_steps("")
+                    self.set_status("Stopped.")
                     break
 
+                self.set_steps("")
                 self.hide()
                 # Windows: refocus the original window (keeps the selection). Elsewhere: click the spot,
                 # unless there is a selection a click would destroy.
@@ -449,20 +622,22 @@ class Session:
                 self.shot = capture(self.anchor)
                 self.show()
                 if reply.get("done"):
+                    self.set_status("Done ✓")
                     break
             else:
-                self.write(f"Reached {MAX_STEPS} steps; stopping.", "act")
+                self.set_status(f"Stopped after {MAX_STEPS} steps.")
         except pyautogui.FailSafeException:
             self.show()
-            self.write("Aborted (mouse moved to corner).", "risky")
+            self.set_status("Aborted (mouse moved to a corner).", RED)
         except Exception as e:
             self.show()
-            self.write(f"Error: {e}", "risky")
+            self.set_status(f"Error: {e}", RED)
         finally:
             self.busy = False
 
     def hide(self):
         done = threading.Event()
+
         def _hide():
             if self.hwnd:            # give focus back while we still own the foreground
                 try:
@@ -472,19 +647,27 @@ class Session:
             self.win.withdraw()
             done.set()
         self.ui(_hide)
-        done.wait()
+        done.wait(2)
         time.sleep(0.25)
 
     def show(self):
-        self.ui(lambda: (self.win.deiconify(), self.win.attributes("-topmost", True)))
+        self.ui(lambda: (self.win.deiconify(), self.win.attributes("-topmost", True), self.grab_focus()))
+
+    def close_from_thread(self):
+        self.app.q.put(self.close)
 
     def close(self):
+        if not self.alive:
+            return
+        self.alive = False
         if self.recorder.stream is not None:
             self.recorder.stream.stop()
             self.recorder.stream.close()
         self.decision = False
         self.decided.set()
         self.win.destroy()
+        if self.app.session is self:
+            self.app.session = None
 
 
 class App:
@@ -492,9 +675,12 @@ class App:
         self.root = tk.Tk()
         self.root.withdraw()
         self.q = queue.Queue()
+        self.session = None
+        self.triggering = False
+        self.last_trigger = 0.0
         self.root.after(30, self.pump)
         keyboard.GlobalHotKeys({HOTKEY: self.on_hotkey}).start()
-        print(f"Caret AI running ({MODEL}). Put your pointer somewhere and press {HOTKEY}. Ctrl+C here to quit.")
+        print(f"Careter running ({MODEL}). Press {HOTKEY} anywhere. Ctrl+C here to quit.")
 
     def pump(self):
         while not self.q.empty():
@@ -505,12 +691,37 @@ class App:
         self.root.after(30, self.pump)
 
     def on_hotkey(self):
-        wait_for_hotkey_release()
-        anchor = pyautogui.position()
-        hwnd, proc = foreground_window()
-        selection = grab_selection(proc)
-        shot = capture(anchor)    # screenshot before the popup appears
-        self.q.put(lambda: Session(self, anchor, shot, hwnd, proc, selection))
+        # one bubble at a time: ignore repeats / key-repeat / our own synthetic keys
+        now = time.time()
+        if self.triggering or now - self.last_trigger < 0.8:
+            return
+        self.triggering, self.last_trigger = True, now
+        try:
+            if self.session and self.session.busy:
+                self.q.put(self.session.grab_focus)      # working: just bring it forward
+                return
+            wait_for_hotkey_release()
+            if self.session:                             # replace the old bubble (one at a time)
+                done = threading.Event()
+                self.q.put(lambda: (self.session and self.session.close(), done.set()))
+                done.wait(1)
+                time.sleep(0.15)
+            hwnd, proc = foreground_window()
+            caret = caret_rect()
+            mouse = pyautogui.position()
+            if caret:
+                anchor, below_y = (caret[0], caret[1]), caret[2]
+            else:
+                anchor, below_y = (mouse[0], mouse[1]), mouse[1] + 16
+            bounds = monitor_bounds(*anchor)
+            selection = grab_selection(proc)
+            shot = capture(anchor)
+            self.q.put(lambda: self.open(anchor, below_y, bounds, shot, hwnd, proc, selection))
+        finally:
+            self.triggering = False
+
+    def open(self, *args):
+        self.session = Session(self, *args)
 
     def run(self):
         try:
@@ -519,5 +730,19 @@ class App:
             pass
 
 
+def single_instance_lock():
+    """Exit if Careter is already running (e.g. started at login and again by hand)."""
+    lock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    if IS_WIN and hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+        lock.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+    try:
+        lock.bind(("127.0.0.1", 47821))
+    except OSError:
+        print("Careter is already running.")
+        sys.exit(0)
+    return lock
+
+
 if __name__ == "__main__":
+    _lock = single_instance_lock()
     App().run()
