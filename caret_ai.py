@@ -56,6 +56,7 @@ FOCUS_CLICK = True      # click the chosen spot before typing, to give it focus 
 SAMPLE_RATE = 16000
 CONTEXT_CHARS = 10      # characters read before and after the caret
 USE_SCREENSHOTS = False # text-only for now: the AI reads only the text at the caret
+DEBUG = True            # show the live log inside the bubble (toggle with 🐞)
 SECTION_BREAKS = True   # stop reading at a blank line (treat it as the end of the section)
 AUTO_SUGGEST = True     # when the bubble opens, analyse the spot and offer next actions
 
@@ -196,12 +197,24 @@ def foreground_window():
 LOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "careter.log")
 
 
+LOG_LINES = []          # in-memory log, shown in the bubble's debug panel
+LOG_LISTENERS = []      # callbacks (bubbles) that want new lines
+
+
 def log(msg):
+    line = time.strftime("%H:%M:%S ") + msg
+    LOG_LINES.append(line)
+    del LOG_LINES[:-300]
     try:
         with open(LOG_PATH, "a", encoding="utf-8") as f:
-            f.write(time.strftime("%H:%M:%S ") + msg + "\n")
+            f.write(line + "\n")
     except Exception:
         pass
+    for fn in list(LOG_LISTENERS):
+        try:
+            fn(line)
+        except Exception:
+            pass
 
 
 def run_with_timeout(fn, seconds, default=None):
@@ -554,6 +567,7 @@ class Session:
         self.entry.bind("<FocusIn>", lambda e: self.clear_placeholder())
         self.entry.bind("<Key>", lambda e: self.clear_placeholder())
         self.mic = self.icon(row, "🎤", self.toggle_mic)
+        self.icon(row, "🐞", self.toggle_debug)
         self.icon(row, "✕", self.close)
 
         # body (hidden until there is something to show)
@@ -571,6 +585,26 @@ class Session:
         self.tools = tk.Frame(box, bg=BG)
         self.button(self.tools, "Copy", self.copy_answer, FIELD).pack(side="left")
         self.button(self.tools, "Insert", self.insert_answer, FIELD).pack(side="left", padx=4)
+
+        # debug log panel (packed last so it sits at the bottom)
+        self.debug = tk.Frame(box, bg=BG)
+        self.debug_text = tk.Text(self.debug, height=10, width=60, bg="#11101a", fg="#c4f0c5",
+                                  insertbackground=FG, relief="flat", wrap="word",
+                                  font=("Consolas", 8) if IS_WIN else ("Menlo", 10))
+        self.debug_text.pack(fill="both", expand=True)
+        dbar = tk.Frame(self.debug, bg=BG)
+        dbar.pack(fill="x", pady=(2, 0))
+        self.button(dbar, "Copy log", self.copy_log, FIELD).pack(side="left")
+        self.button(dbar, "Clear", lambda: self.debug_text.delete("1.0", "end"), FIELD).pack(side="left", padx=4)
+        for line in LOG_LINES[app.log_start:]:      # lines from this hotkey press
+            self.debug_text.insert("end", line + "\n")
+        self.debug_text.see("end")
+        self.on_log = lambda line: self.ui(lambda: (self.debug_text.insert("end", line + "\n"),
+                                                    self.debug_text.see("end")))
+        LOG_LISTENERS.append(self.on_log)
+        self.debug_open = False
+        if DEBUG:
+            self.toggle_debug()
 
         self.place()
         win.after(30, self.grab_focus)
@@ -703,6 +737,19 @@ class Session:
     def set_steps(self, text, risky=False):
         self.ui(lambda: self.show_part(self.steps, text, fg=RED if risky else MUTED))
 
+    # --- debug panel
+    def toggle_debug(self):
+        self.debug_open = not self.debug_open
+        if self.debug_open:
+            self.debug.pack(side="bottom", fill="both", expand=True, pady=(8, 0))
+        else:
+            self.debug.pack_forget()
+        self.place()
+
+    def copy_log(self):
+        pyperclip.copy(self.debug_text.get("1.0", "end"))
+        self.set_status("Log copied ✓")
+
     # --- analyse the spot and offer next actions
     def suggest(self):
         if not self.ctx and not USE_SCREENSHOTS:
@@ -715,10 +762,15 @@ class Session:
         if USE_SCREENSHOTS and self.shot:
             content.append({"type": "image_url", "image_url": {"url": self.shot[1], "detail": "high"}})
         try:
+            log("→ suggest: " + " | ".join(c["text"] for c in content if c["type"] == "text"))
+            t0 = time.time()
             resp = client.chat.completions.create(model=MODEL, messages=[
                 {"role": "system", "content": SUGGEST_SYSTEM}, {"role": "user", "content": content}])
-            data = parse_reply(resp.choices[0].message.content)
+            raw = resp.choices[0].message.content
+            log(f"← suggest ({time.time() - t0:.1f}s): {raw}")
+            data = parse_reply(raw)
         except Exception as e:
+            log("suggest failed:\n" + traceback.format_exc())
             self.set_status(f"Error: {e}", RED)
             return
         if self.busy or len(self.msgs) > 1:
@@ -854,8 +906,11 @@ class Session:
                                 for u in self.shot]
                 self.msgs.append({"role": "user", "content": content})
                 self.set_status("Thinking…")
+                log(f"→ step {step + 1}: {text}")
+                t0 = time.time()
                 resp = client.chat.completions.create(model=MODEL, messages=self.msgs)
                 raw = resp.choices[0].message.content
+                log(f"← step {step + 1} ({time.time() - t0:.1f}s): {raw}")
                 self.msgs.append({"role": "assistant", "content": raw})
                 reply = parse_reply(raw)
                 self.set_status("")
@@ -877,6 +932,7 @@ class Session:
                 self.hide()
                 # Windows: refocus the original window (keeps the selection). Elsewhere: click the spot,
                 # unless there is a selection a click would destroy.
+                log("running: " + "; ".join(describe(a) for a in actions))
                 run_actions(actions, self.anchor,
                             click_to_focus=FOCUS_CLICK and not self.hwnd and not self.selection)
                 self.selection = ""      # it has been replaced/used
@@ -891,6 +947,7 @@ class Session:
             self.show()
             self.set_status("Aborted (mouse moved to a corner).", RED)
         except Exception as e:
+            log("agent failed:\n" + traceback.format_exc())
             self.show()
             self.set_status(f"Error: {e}", RED)
         finally:
@@ -940,6 +997,8 @@ class Session:
         if not self.alive:
             return
         self.alive = False
+        if self.on_log in LOG_LISTENERS:
+            LOG_LISTENERS.remove(self.on_log)
         if self.recorder.stream is not None:
             self.recorder.stream.stop()
             self.recorder.stream.close()
@@ -958,6 +1017,7 @@ class App:
         self.session = None
         self.triggering = False
         self.last_trigger = 0.0
+        self.log_start = 0
         self.root.after(30, self.pump)
         if IS_WIN:
             # OS-level hotkey: exact Ctrl+Alt+Space only, never fires from normal typing or clicks
@@ -998,7 +1058,8 @@ class App:
             else:
                 anchor, below_y = (mouse[0], mouse[1]), mouse[1] + 16
             bounds = monitor_bounds(*anchor)
-            log(f"hotkey in app={proc}")
+            self.log_start = len(LOG_LINES)
+            log(f"hotkey in app={proc} hwnd={hwnd}")
             selection = ""
             try:
                 selection = grab_selection(proc)          # Ctrl+C; skipped in terminals
