@@ -16,6 +16,7 @@ import os
 import platform
 import queue
 import re
+import traceback
 import socket
 import sys
 import tempfile
@@ -54,6 +55,7 @@ MAX_STEPS = 12          # max look -> act cycles per request
 FOCUS_CLICK = True      # click the chosen spot before typing, to give it focus back
 SAMPLE_RATE = 16000
 CONTEXT_CHARS = 10      # characters read before and after the caret
+USE_SCREENSHOTS = False # text-only for now: the AI reads only the text at the caret
 SECTION_BREAKS = True   # stop reading at a blank line (treat it as the end of the section)
 AUTO_SUGGEST = True     # when the bubble opens, analyse the spot and offer next actions
 
@@ -67,16 +69,16 @@ client = OpenAI()           # reads OPENAI_API_KEY
 
 SUGGEST_SYSTEM = """You help a user who just called an assistant at their text caret.
 You get the text around the caret ("▮" marks the caret, [[ ]] marks a selection; this is only the
-section the caret is in) and/or a zoomed screenshot of that spot.
+section the caret is in). You do not see the screen, only this text.
 1. In one short line, say what this is (e.g. "Bullet list of essay topics", "PowerShell after a failed pip install").
 2. Offer 2-4 next actions the user most likely wants right here, as button labels of at most 5 words
    (e.g. "Fix grammar", "Continue writing", "Explain this", "Fix the error").
 Reply ONLY with JSON: {"summary": "...", "suggestions": ["...", "..."]}"""
 
 SYSTEM = f"""You are Caret AI, an assistant that lives at the user's pointer on their {platform.system()} desktop.
-Each turn you receive the user's goal, a screenshot with a RED CROSSHAIR at the spot the user chose,
-and a zoomed crop around that spot. Read the text near the crosshair carefully: that is the user's
-context (a terminal prompt and its output, a paragraph in an ebook, a form field, code, ...).
+Each turn you receive the user's goal, the app they are in, and the TEXT AROUND THE CARET
+(a few characters before and after it) or the text they selected. You do NOT see the screen;
+work only from that text and the goal. If the text is too little to act on, ask a short question in "say".
 
 Reply with ONLY a JSON object, no markdown:
 {{
@@ -92,19 +94,18 @@ Action types:
   {{"type": "wait", "seconds": 2}}             waits (e.g. for a command to finish) before the next look
 
 Rules:
-- Terminal: type the command, press enter, then wait. Next turn you will see the output; read it and
-  continue (fix errors, run the next step) until the goal is met.
+- Terminal: type the command, press enter, then wait. You may not see the output
+  afterwards, so prefer one complete command; set done true unless you are sure what comes next.
 - If the user only wants information (explain, translate, summarize, define what is on screen), put the
   answer in "say", leave "actions" empty and set "done": true.
 - Set "risky": true for anything destructive or hard to undo (deleting files, sudo, force push, killing
   processes, installing/uninstalling, sending messages, payments).
 - Set "done": true when the goal is achieved or you cannot proceed, and say why.
-- TEXT AROUND CARET (if given) is the section the user is working in: "▮" marks the caret and
-  [[ ]] marks the selection. Prefer it over reading the screenshot; use the screenshot for layout.
+- TEXT AROUND CARET: "▮" marks the caret and [[ ]] marks the selection.
+- To insert text at the caret, use a "type" action with just the new text.
 - If SELECTED TEXT is given, that is what the user means by "this", "the text", "selected". To change it,
   return ONE "type" action containing the full replacement text: typing replaces the selection. No enter.
-- If the crosshair is on empty space, use the whole screenshot (the active window) to find the context.
-- Never pretend to see output that is not on screen. Keep each turn's action list short.
+- Never pretend to know text you were not given. Keep each turn's action list short.
 """
 
 
@@ -281,8 +282,11 @@ def read_context_by_keys(proc, chars=CONTEXT_CHARS):
     def copy_side(extend_key, collapse_key):
         sentinel = f"__careter_{time.time()}__"
         pyperclip.copy(sentinel)
-        with pyautogui.hold("shift"):
+        pyautogui.keyDown("shift")
+        try:
             pyautogui.press(extend_key, presses=chars, interval=0.005)
+        finally:
+            pyautogui.keyUp("shift")
         time.sleep(0.05)
         pyautogui.hotkey(mod, "c")
         time.sleep(0.15)
@@ -299,6 +303,22 @@ def read_context_by_keys(proc, chars=CONTEXT_CHARS):
     finally:
         pyperclip.copy(old)
     return trim_context(before, "", after)
+
+
+def read_caret_context(proc):
+    """Text around the caret. Normal apps: move the caret (Shift+arrows, copy, collapse back).
+    Terminals (where those keys are unsafe) or if that fails: ask the app via UI Automation."""
+    ctx = None
+    if not (IS_WIN and proc in TERMINALS):
+        try:
+            ctx = read_context_by_keys(proc)
+            log(f"keys -> {format_context(ctx) if ctx else 'nothing'}")
+        except Exception:
+            log("keys failed:\n" + traceback.format_exc())
+    if not ctx and IS_WIN:
+        ctx = run_with_timeout(read_text_context, 1.5)
+        log(f"uia -> {format_context(ctx) if ctx else 'nothing'}")
+    return ctx
 
 
 def format_context(ctx):
@@ -515,7 +535,7 @@ class Session:
             tk.Label(box, text=f"📄 caret: “{seen}”", bg=BG, fg=MUTED, font=FONT,
                      anchor="w").pack(fill="x", pady=(0, 4))
         elif not ctx and not selection:
-            tk.Label(box, text="📷 couldn't read text here, using the screenshot", bg=BG, fg=MUTED,
+            tk.Label(box, text="⚠ couldn't read text at the caret (see careter.log)", bg=BG, fg=RED,
                      font=FONT, anchor="w").pack(fill="x", pady=(0, 4))
 
         # input row
@@ -685,12 +705,15 @@ class Session:
 
     # --- analyse the spot and offer next actions
     def suggest(self):
+        if not self.ctx and not USE_SCREENSHOTS:
+            self.set_status("")                 # nothing to analyse; just let the user type
+            return
         content = []
         if self.ctx:
-            content.append({"type": "text", "text": "TEXT AROUND CARET:\n" + format_context(self.ctx)})
-        content.append({"type": "image_url", "image_url": {"url": self.shot[1], "detail": "high"}})
-        if not self.ctx:   # no text from the app: give the whole screen too
-            content.append({"type": "image_url", "image_url": {"url": self.shot[0], "detail": "high"}})
+            content.append({"type": "text", "text": f"App: {self.proc or 'unknown'}\nTEXT AROUND CARET:\n"
+                                                    + format_context(self.ctx)})
+        if USE_SCREENSHOTS and self.shot:
+            content.append({"type": "image_url", "image_url": {"url": self.shot[1], "detail": "high"}})
         try:
             resp = client.chat.completions.create(model=MODEL, messages=[
                 {"role": "system", "content": SUGGEST_SYSTEM}, {"role": "user", "content": content}])
@@ -809,7 +832,7 @@ class Session:
         try:
             if len(self.msgs) > 1:      # follow-up: take a fresh look first
                 self.hide()
-                self.shot = capture(self.anchor)
+                self.look()
                 self.show()
             for step in range(MAX_STEPS):
                 strip_old_images(self.msgs)
@@ -822,13 +845,14 @@ class Session:
                     if self.selection:
                         text += f'\nSELECTED TEXT:\n"""\n{self.selection}\n"""'
                 else:
-                    text = "Screen after your actions. Continue toward the goal."
-                full, crop = self.shot
-                self.msgs.append({"role": "user", "content": [
-                    {"type": "text", "text": text},
-                    {"type": "image_url", "image_url": {"url": full, "detail": "high"}},
-                    {"type": "image_url", "image_url": {"url": crop, "detail": "high"}},
-                ]})
+                    text = "Your actions ran. TEXT AROUND CARET now:\n" + (
+                        format_context(self.ctx) if self.ctx else "(could not read)") + \
+                        "\nContinue toward the goal, or set done true."
+                content = [{"type": "text", "text": text}]
+                if USE_SCREENSHOTS and self.shot:
+                    content += [{"type": "image_url", "image_url": {"url": u, "detail": "high"}}
+                                for u in self.shot]
+                self.msgs.append({"role": "user", "content": content})
                 self.set_status("Thinking…")
                 resp = client.chat.completions.create(model=MODEL, messages=self.msgs)
                 raw = resp.choices[0].message.content
@@ -856,8 +880,7 @@ class Session:
                 run_actions(actions, self.anchor,
                             click_to_focus=FOCUS_CLICK and not self.hwnd and not self.selection)
                 self.selection = ""      # it has been replaced/used
-                self.ctx = None
-                self.shot = capture(self.anchor)
+                self.look()
                 self.show()
                 if reply.get("done"):
                     self.set_status("Done ✓")
@@ -872,6 +895,16 @@ class Session:
             self.set_status(f"Error: {e}", RED)
         finally:
             self.busy = False
+
+    def look(self):
+        """Re-read the caret (and screenshot if enabled) while the target app has focus."""
+        try:
+            self.ctx = read_caret_context(self.proc)
+        except Exception:
+            self.ctx = None
+            log("look failed:\n" + traceback.format_exc())
+        if USE_SCREENSHOTS:
+            self.shot = capture(self.anchor)
 
     def hide(self):
         self.acting = True
@@ -965,16 +998,18 @@ class App:
             else:
                 anchor, below_y = (mouse[0], mouse[1]), mouse[1] + 16
             bounds = monitor_bounds(*anchor)
-            ctx = run_with_timeout(read_text_context, 1.5)
-            # UI Automation gives the selection directly; only fall back to Ctrl+C when it can't
-            selection = ctx[1] if ctx else grab_selection(proc)
-            if not ctx and not selection:
-                ctx = read_context_by_keys(proc)
-            elif not ctx and selection:
-                ctx = ("", selection, "")
-            log(f"app={proc} context={'none' if not ctx else format_context(ctx)[:300]!r}")
-            shot = capture(anchor)
+            log(f"hotkey in app={proc}")
+            selection = ""
+            try:
+                selection = grab_selection(proc)          # Ctrl+C; skipped in terminals
+            except Exception:
+                log("selection failed:\n" + traceback.format_exc())
+            ctx = ("", selection, "") if selection else read_caret_context(proc)
+            log(f"context = {format_context(ctx)[:300] if ctx else 'none'!r}")
+            shot = capture(anchor) if USE_SCREENSHOTS else None
             self.q.put(lambda: self.open(anchor, below_y, bounds, shot, hwnd, proc, selection, ctx))
+        except Exception:
+            log("hotkey failed:\n" + traceback.format_exc())
         finally:
             self.triggering = False
 
