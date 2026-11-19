@@ -153,10 +153,53 @@ KEY_ALIASES = {"return": "enter", "esc": "escape", "cmd": "command" if IS_MAC el
                "control": "ctrl", "option": "alt", "del": "delete"}
 
 
+# Windows: send keys ourselves. pyautogui sends arrows/Home/End as *numpad* keys, and with Num Lock on
+# Windows cancels Shift for those, so Shift+Left moves the caret without selecting anything.
+VK = {"shift": 0x10, "ctrl": 0x11, "alt": 0x12, "win": 0x5B, "command": 0x5B,
+      "left": 0x25, "up": 0x26, "right": 0x27, "down": 0x28, "home": 0x24, "end": 0x23,
+      "pageup": 0x21, "pagedown": 0x22, "pgup": 0x21, "pgdn": 0x22, "insert": 0x2D, "delete": 0x2E,
+      "enter": 0x0D, "tab": 0x09, "escape": 0x1B, "backspace": 0x08, "space": 0x20}
+EXTENDED_VK = {0x25, 0x26, 0x27, 0x28, 0x24, 0x23, 0x21, 0x22, 0x2D, 0x2E, 0x5B}
+
+
+def _vk(key):
+    key = key.lower()
+    if key in VK:
+        return VK[key]
+    if re.fullmatch(r"f([1-9]|1[0-2])", key):
+        return 0x6F + int(key[1:])
+    if len(key) == 1:
+        import ctypes
+        code = ctypes.windll.user32.VkKeyScanW(ord(key))
+        return code & 0xFF if code != -1 else None
+    return None
+
+
+def _win_key(vk, up):
+    import ctypes
+    user32 = ctypes.windll.user32
+    flags = (0x0001 if vk in EXTENDED_VK else 0) | (0x0002 if up else 0)   # EXTENDEDKEY | KEYUP
+    user32.keybd_event(vk, user32.MapVirtualKeyW(vk, 0), flags, 0)
+
+
+def send_hotkey(*keys):
+    """Press keys together (e.g. send_hotkey('shift', 'left')), real arrow keys on Windows."""
+    keys = [KEY_ALIASES.get(k.lower(), k.lower()) for k in keys]
+    vks = [_vk(k) for k in keys] if IS_WIN else []
+    if IS_WIN and all(vks):
+        for v in vks:
+            _win_key(v, False)
+        for v in reversed(vks):
+            _win_key(v, True)
+        time.sleep(0.005)
+    else:
+        pyautogui.hotkey(*keys)
+
+
 def paste(text):
     old = pyperclip.paste()
     pyperclip.copy(text)
-    pyautogui.hotkey("command" if IS_MAC else "ctrl", "v")
+    send_hotkey("command" if IS_MAC else "ctrl", "v")
     time.sleep(0.2)
     pyperclip.copy(old)
 
@@ -295,17 +338,15 @@ def read_context_by_keys(proc, chars=CONTEXT_CHARS):
     def copy_side(extend_key, collapse_key):
         sentinel = f"__careter_{time.time()}__"
         pyperclip.copy(sentinel)
-        pyautogui.keyDown("shift")
-        try:
-            pyautogui.press(extend_key, presses=chars, interval=0.005)
-        finally:
-            pyautogui.keyUp("shift")
+        for _ in range(chars):
+            send_hotkey("shift", extend_key)
         time.sleep(0.05)
-        pyautogui.hotkey(mod, "c")
+        send_hotkey(mod, "c")
         time.sleep(0.15)
         text = pyperclip.paste()
+        log(f"  shift+{extend_key} x{chars} copied: {'nothing' if text == sentinel else repr(text)}")
         if text != sentinel and text:
-            pyautogui.press(collapse_key)    # collapse the selection back onto the caret
+            send_hotkey(collapse_key)        # collapse the selection back onto the caret
             time.sleep(0.03)
             return text
         return ""                             # at the start/end: nothing selected, caret didn't move
@@ -408,7 +449,7 @@ def grab_selection(proc):
         old = ""
     sentinel = f"__careter_{time.time()}__"
     pyperclip.copy(sentinel)
-    pyautogui.hotkey("command" if IS_MAC else "ctrl", "c")
+    send_hotkey("command" if IS_MAC else "ctrl", "c")
     time.sleep(0.3)
     selected = pyperclip.paste()
     pyperclip.copy(old)
@@ -430,7 +471,7 @@ def run_actions(actions, anchor, click_to_focus=FOCUS_CLICK):
         elif kind == "key":
             keys = [KEY_ALIASES.get(k.lower(), k.lower()) for k in a.get("keys", [])]
             if keys:
-                pyautogui.hotkey(*keys)
+                send_hotkey(*keys)
         elif kind == "wait":
             time.sleep(min(float(a.get("seconds", 1)), 60))
         time.sleep(0.1)
