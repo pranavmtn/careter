@@ -178,7 +178,7 @@ def _vk(key):
         return 0x6F + int(key[1:])
     if len(key) == 1:
         import ctypes
-        code = ctypes.windll.user32.VkKeyScanW(ord(key))
+        code = ctypes.windll.user32.VkKeyScanW(ctypes.c_wchar(key))
         return code & 0xFF if code != -1 else None
     return None
 
@@ -1138,14 +1138,15 @@ class Predictions:
         try:
             t0 = time.time()
             log(f"predict: loading {PREDICT_MODEL} (first run downloads it)…")
-            from predict import LocalLM, Predictor
-            self.predictor = Predictor(LocalLM(PREDICT_MODEL))
+            from predict import PredictorProcess
+            self.predictor = PredictorProcess(PREDICT_MODEL)       # model runs in its own process
             warm = self.predictor.predict("Hello, how are ")      # warm-up
             log(f"predict: ready in {time.time() - t0:.1f}s, test: {[w for w, _ in warm]}")
-        except ImportError:
-            log("predict: off. It needs torch + transformers: pip install -r requirements.txt")
-        except Exception:
-            log("predict: model failed to load:\n" + traceback.format_exc())
+        except Exception as e:
+            if "No module named" in str(e):
+                log("predict: off. It needs torch + transformers: pip install -r requirements.txt")
+            else:
+                log("predict: model failed to load:\n" + traceback.format_exc())
 
     def toggle(self):
         self.enabled = not self.enabled
@@ -1262,7 +1263,7 @@ class Predictions:
             if not text.strip():
                 return why(f"no text before caret in {proc} (uia={'yes' if uia else 'no'})")
             t0 = time.time()
-            words = self.predictor.predict(text, PREDICT_COUNT)
+            words = self.predictor.predict(text, PREDICT_COUNT, cancelled=lambda: gen != self.gen)
             ms = (time.time() - t0) * 1000
             if gen != self.gen:
                 return
