@@ -438,7 +438,7 @@ def osa_distance(a, b):
 
 class Speller:
     """Fixes typos using the word-frequency list: famous typos (teh -> the) always, one-letter
-    mistakes, and two-letter mistakes in words of 7+ letters. Conservative on purpose: lowercase
+    mistakes, two-letter mistakes in words of 7+ letters, and three in words of 9+. Conservative on purpose: lowercase
     words only (no names, ACRONYMS or numbers), and words you undo are remembered in
     user_words.txt and never corrected again."""
     COMMON = 40_000     # words more common than this rank are never "corrected"
@@ -446,6 +446,8 @@ class Speller:
     TARGET1 = 30_000      # a one-letter fix only aims at the 30k most common words
     EDIT2_WORDS = 15_000  # two-letter fixes only aim at the 15k most common words
     EDIT2_MIN_LEN = 7     # ...and only for words this long (shorter ones have too many neighbours)
+    LONG_MIN_LEN = 9      # long words may be 3 letters off ("aknoldgement" -> "acknowledgement")
+    LONG_WORDS = 60_000   # ...aiming at the 60k most common words
 
     def __init__(self, ngram, folder):
         self.ng = ngram
@@ -457,6 +459,12 @@ class Speller:
             if len(w) >= self.EDIT2_MIN_LEN - 2:
                 for k in {w} | {w[:j] + w[j + 1:] for j in range(len(w))}:
                     self.dix.setdefault(k, []).append(i)
+        # Index for long words: first letter -> (word, letter pairs). Letter-pair overlap picks a
+        # handful of look-alikes quickly; only those get the exact (slower) distance check.
+        self.long = {}
+        for w in ngram.words[: self.LONG_WORDS]:
+            if len(w) >= self.LONG_MIN_LEN - 3:
+                self.long.setdefault(w[0], []).append((w, self.pairs(w)))
         self.user_model = None                          # set by the app when learning is on
         self.path = os.path.join(folder, "user_words.txt")
         self.user = set()
@@ -497,7 +505,32 @@ class Speller:
                     found.add(self.ng.words[i])
         cands = [c for c in found if ok(c, self.EDIT2_WORDS) and abs(len(c) - len(word)) <= 2
                  and osa_distance(word, c) <= 2]
-        return best(cands) if cands else None
+        if cands:
+            return best(cands)
+        if len(word) >= self.LONG_MIN_LEN:
+            cands = self.long_fix(word, ok)             # three letters off, long words only
+            if cands:
+                return best(cands)
+        return None
+
+    @staticmethod
+    def pairs(w):
+        return {w[i:i + 2] for i in range(len(w) - 1)}
+
+    def long_fix(self, word, ok):
+        """Words of 9+ letters: closest common word within 3 edits (about a quarter of the word)."""
+        mine, best, best_d = self.pairs(word), [], 4
+        for w, wp in self.long.get(word[0], ()):
+            if abs(len(w) - len(word)) > 3 or not ok(w, self.LONG_WORDS):
+                continue
+            if len(mine & wp) / len(mine | wp) < 0.4:      # quick look-alike filter
+                continue
+            d = osa_distance(word, w)
+            if d < best_d:
+                best, best_d = [w], d
+            elif d == best_d:
+                best.append(w)
+        return best if best_d <= 3 else []
 
     def remember(self, word):
         word = word.lower()
