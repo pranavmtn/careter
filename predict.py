@@ -7,8 +7,11 @@ An LLM only ever predicts the next *token*. This module turns that into word sug
 It reads the model's top next tokens, keeps the ones that start a word (and match what
 you've typed of it), then extends each greedily until the word ends.
 """
+import os
 import re
 import threading
+
+os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")   # harmless on Windows without symlinks
 
 WORD = r"[^\W_]|['’\-]"                   # letters/digits plus ' ’ - inside words
 PARTIAL_RE = re.compile(rf"(?:{WORD})*\Z")
@@ -25,7 +28,11 @@ class LocalLM:
         torch.set_num_threads(threads)
         self.torch = torch
         self.tok = AutoTokenizer.from_pretrained(name)
-        self.model = AutoModelForCausalLM.from_pretrained(name, torch_dtype=torch.float32).eval()
+        try:
+            self.model = AutoModelForCausalLM.from_pretrained(name, dtype=torch.float32)
+        except TypeError:                    # transformers older than 4.56
+            self.model = AutoModelForCausalLM.from_pretrained(name, torch_dtype=torch.float32)
+        self.model.eval()
         self.max_ctx = max_ctx_tokens
         bos = self.tok.bos_token_id
         self.bos = [bos] if bos is not None else []
