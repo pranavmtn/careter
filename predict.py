@@ -357,3 +357,20 @@ class NGramPredictor:
                 shown = w
             out.append((shown, shown[len(partial):] + " "))
         return out
+
+
+class HybridPredictor:
+    """The LLM when it answers in time, otherwise the instant word-count engine."""
+
+    def __init__(self, llm, ngram, timeout=0.6):
+        self.llm, self.ngram, self.timeout = llm, ngram, timeout
+        self.last = "ngram"
+
+    def predict(self, text, n=3, cancelled=None):
+        if self.llm.proc.is_alive():
+            words = self.llm.predict(text, n, cancelled=cancelled, timeout=self.timeout)
+            if words:
+                self.last = "llm"
+                return words
+        self.last = "ngram"
+        return self.ngram.predict(text, n)

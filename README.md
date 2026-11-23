@@ -31,13 +31,13 @@ While you type anywhere, Careter suggests the next word, or the rest of the word
 
 Two engines, both local and free (neither uses the OpenAI key). What you type stays in memory on your PC and is never logged. It never runs in password boxes, in terminals (`PREDICT_IN_TERMINALS`), or inside Careter's own bubble.
 
-- **`ngram` (default): instant.** Counts of the most common English words and word pairs (Peter Norvig's lists from Google's Web 1T data, about 10 MB, downloaded once into `careter/ngrams/`). It completes the word you're typing and predicts the next word from the one before.
-- **`llm`: smarter, heavier.** A small open-source model (`HuggingFaceTB/SmolLM2-135M`) in its own low-priority process. Install `pip install -r requirements-llm.txt` and set `CARET_PREDICT_ENGINE=llm`. Turning an LLM's next-*token* guesses into words is done in `predict.py`.
+- **`ngram`: instant.** Counts of the most common English words and word pairs (Peter Norvig's lists from Google's Web 1T data, about 10 MB, downloaded once into `careter/ngrams/`). It completes the word you're typing and predicts the next word from the one before.
+- **`llm` (default): smarter.** A small open-source model (`HuggingFaceTB/SmolLM2-135M`) in its own low-priority process (`pip install -r requirements-llm.txt`). The word lists load first and answer whenever the LLM is still loading, missing, or slower than `PREDICT_LLM_TIMEOUT` (0.6 s), so the strip always stays quick. Turning an LLM's next-*token* guesses into words is done in `predict.py`.
 
 | Env var | Default | Purpose |
 |---|---|---|
 | `CARET_PREDICT` | `1` | `0` starts with prediction off |
-| `CARET_PREDICT_ENGINE` | `ngram` | `ngram` or `llm` |
+| `CARET_PREDICT_ENGINE` | `llm` | `llm` (with word lists as backup) or `ngram` only |
 | `CARET_PREDICT_MODEL` | `HuggingFaceTB/SmolLM2-135M` | For `llm`: any Hugging Face **base** (not chat) causal LM |
 
 In Chrome and other apps that don't report their caret position, the strip appears at the mouse pointer.

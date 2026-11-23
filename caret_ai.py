@@ -62,7 +62,8 @@ AUTO_SUGGEST = True     # when the bubble opens, analyse the spot and offer next
 
 # Word prediction while you type (Windows). Runs a small local model: no API key, nothing leaves the PC.
 PREDICT = os.getenv("CARET_PREDICT", "1") != "0"
-PREDICT_ENGINE = os.getenv("CARET_PREDICT_ENGINE", "ngram")  # "ngram" (instant, word counts) or "llm"
+PREDICT_ENGINE = os.getenv("CARET_PREDICT_ENGINE", "llm")    # "llm" (smarter) or "ngram" (word counts only)
+PREDICT_LLM_TIMEOUT = 0.6     # if the LLM takes longer, show the word-count suggestions instead
 PREDICT_MODEL = os.getenv("CARET_PREDICT_MODEL", "HuggingFaceTB/SmolLM2-135M")   # llm engine: a *base* model
 PREDICT_DELAY = 0.18          # seconds of no typing before suggestions appear
 PREDICT_COUNT = 3             # suggestions shown
@@ -1159,26 +1160,39 @@ class Predictions:
 
     # --- model
     def load(self):
-        if not self.enabled:
+        """Word lists first (ready in seconds), then the LLM on top when the engine is "llm"."""
+        if not self.enabled or getattr(self, "loading", False):
             return
+        self.loading = True
         try:
             t0 = time.time()
-            if PREDICT_ENGINE == "llm":
-                log(f"predict: loading {PREDICT_MODEL} (first run downloads it)…")
-                from predict import PredictorProcess
-                self.predictor = PredictorProcess(PREDICT_MODEL)   # model runs in its own process
-            else:
-                log("predict: loading word lists…")
-                from predict import NGramPredictor
-                folder = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ngrams")
-                self.predictor = NGramPredictor(folder, log=log)
-            warm = self.predictor.predict("Hello, how are ")      # warm-up
-            log(f"predict: ready in {time.time() - t0:.1f}s, test: {[w for w, _ in warm]}")
-        except Exception as e:
-            if "No module named" in str(e) and PREDICT_ENGINE == "llm":
-                log("predict: off. It needs torch + transformers: pip install -r requirements.txt")
-            else:
-                log("predict: model failed to load:\n" + traceback.format_exc())
+            from predict import HybridPredictor, NGramPredictor, PredictorProcess
+            log("predict: loading word lists…")
+            folder = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ngrams")
+            ngram = NGramPredictor(folder, log=log)
+            self.predictor = ngram
+            log(f"predict: word lists ready in {time.time() - t0:.1f}s")
+            if PREDICT_ENGINE != "llm":
+                return
+            t0 = time.time()
+            log(f"predict: loading {PREDICT_MODEL} (first run downloads it)…")
+            try:
+                llm = PredictorProcess(PREDICT_MODEL)              # model runs in its own process
+            except Exception as e:
+                if "No module named" in str(e):
+                    log("predict: LLM needs torch + transformers: pip install -r requirements-llm.txt. "
+                        "Using word lists.")
+                else:
+                    log("predict: LLM failed to load, using word lists:\n" + traceback.format_exc())
+                return
+            hybrid = HybridPredictor(llm, ngram, PREDICT_LLM_TIMEOUT)
+            warm = llm.predict("Hello, how are ", timeout=30)    # warm-up
+            self.predictor = hybrid
+            log(f"predict: LLM ready in {time.time() - t0:.1f}s, test: {[w for w, _ in warm]}")
+        except Exception:
+            log("predict: failed to load:\n" + traceback.format_exc())
+        finally:
+            self.loading = False
 
     def toggle(self):
         self.enabled = not self.enabled
@@ -1308,7 +1322,8 @@ class Predictions:
             if not point:
                 mx, my = pyautogui.position()
                 point, where = (mx, my, my + 16), "mouse"
-            why(f"{len(words)} words in {ms:.0f}ms from {source} in {proc}, strip at {where} {point[0]},{point[2]}")
+            engine = getattr(self.predictor, "last", "ngram")
+            why(f"{len(words)} words by {engine} in {ms:.0f}ms from {source} in {proc}, strip at {where} {point[0]},{point[2]}")
             self.app.q.put(lambda: self.show(words, point, gen))
         except Exception:
             log("predict failed:\n" + traceback.format_exc())
