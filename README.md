@@ -4,7 +4,7 @@ An AI that lives at your cursor. Point at any spot on screen (a terminal, an ebo
 
 ## How it works
 
-1. Put your pointer somewhere and **tap Ctrl twice** quickly.
+1. Put your pointer somewhere and press **Ctrl+Alt+Space**.
 2. A popup opens next to it. Type the goal or click 🎤 to say it.
 3. The model (GPT-6 Luna by default) gets a screenshot with a red crosshair at your spot plus a zoomed crop.
 4. It shows the planned actions (`type: git status`, `press: enter`) and waits for **Run** or **Stop**. Risky actions are flagged in red.
@@ -25,9 +25,9 @@ When the bubble opens it first says what it sees and offers 2–4 one-click next
 
 While you type anywhere, Careter suggests the next word, or the rest of the word you're typing, in a small strip at the caret:
 
-- **Tab** inserts the first suggestion. **Ctrl+2 / Ctrl+3** (or a click) picks another. After you accept, it suggests the word after that.
-- Keep typing or press **Esc** and the strip goes away. Tab and Ctrl+digit behave normally whenever the strip isn't showing.
-- **Ctrl+Alt+P** turns prediction on and off.
+- Up to **5 suggestions**, numbered. Press **1–5** to insert one (**Tab** also takes the first). After you accept, it suggests the word after that.
+- Keep typing or press **Esc** and the strip goes away. Number keys and Tab behave normally whenever the strip isn't showing.
+- **Double-tap Ctrl** (or Ctrl+Alt+P) turns prediction off and on, e.g. when you need to type numbers. A label at the mouse shows which.
 
 Two engines, both local and free (neither uses the OpenAI key). What you type stays in memory on your PC and is never logged. It never runs in password boxes, in terminals (`PREDICT_IN_TERMINALS`), or inside Careter's own bubble.
 

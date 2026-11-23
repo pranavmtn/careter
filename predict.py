@@ -73,7 +73,7 @@ class Predictor:
     """Turns next-token predictions into word suggestions. All candidate words grow one token per
     step, so each step is ONE batched forward pass however many candidates there are."""
 
-    def __init__(self, lm, seeds=8, max_word_tokens=4):
+    def __init__(self, lm, seeds=10, max_word_tokens=4):
         self.lm, self.seeds, self.max_word_tokens = lm, seeds, max_word_tokens
         self.lock = threading.Lock()
 

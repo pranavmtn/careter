@@ -6,7 +6,7 @@ hotkey, then type or speak what you want. It screenshots the screen with a
 marker at that spot, reads the text around it, proposes actions, asks you to
 confirm, runs them, looks at the result, and keeps going until done.
 
-Hotkey:  tap Ctrl twice quickly   (see DoubleCtrl)
+Hotkey:  Ctrl+Alt+Space   (change HOTKEY below). Double-tap Ctrl: word prediction on/off.
 Abort:   Esc in the popup, or slam the mouse into a screen corner while it types.
 """
 import base64
@@ -50,7 +50,7 @@ def load_env_file():
 load_env_file()
 MODEL = os.getenv("CARET_AI_MODEL", "gpt-6-luna")
 TRANSCRIBE_MODEL = os.getenv("CARET_AI_STT", "whisper-1")
-HOTKEY = "Ctrl Ctrl (double-tap)"
+HOTKEY = "<ctrl>+<alt>+<space>"
 MAX_STEPS = 12          # max look -> act cycles per request
 FOCUS_CLICK = True      # click the chosen spot before typing, to give it focus back
 SAMPLE_RATE = 16000
@@ -66,9 +66,9 @@ PREDICT_ENGINE = os.getenv("CARET_PREDICT_ENGINE", "llm")    # "llm" (smarter) o
 PREDICT_LLM_TIMEOUT = 0.6     # if the LLM takes longer, show the word-count suggestions instead
 PREDICT_MODEL = os.getenv("CARET_PREDICT_MODEL", "HuggingFaceTB/SmolLM2-135M")   # llm engine: a *base* model
 PREDICT_DELAY = 0.18          # seconds of no typing before suggestions appear
-PREDICT_COUNT = 3             # suggestions shown
+PREDICT_COUNT = 5             # suggestions shown, picked with keys 1-5
 PREDICT_IN_TERMINALS = False  # shell commands aren't prose; off by default
-PREDICT_HOTKEY = "Ctrl+Alt+P" # turns predictions on/off
+PREDICT_HOTKEY = "double-tap Ctrl (or Ctrl+Alt+P)"  # turns predictions on/off
 
 IS_MAC = platform.system() == "Darwin"
 IS_WIN = platform.system() == "Windows"
@@ -1108,7 +1108,7 @@ class Predictions:
     A keyboard hook keeps a short buffer of what you typed in the current window. After a short
     pause it reads the text before the caret (UI Automation, or the buffer if the app hides its
     text), asks the model for the next words and shows them in a strip at the caret that never
-    takes focus. Tab inserts the first, Ctrl+1/2/3 (or a click) picks one. Those keys are only
+    takes focus. Keys 1-5 pick a suggestion (Tab = the first). Those keys are only
     captured while the strip is showing. Typed text stays in memory and is never logged."""
 
     BUF_MAX = 400
@@ -1221,8 +1221,12 @@ class Predictions:
             pick = None
             if vk == 0x09 and not (ctrl or alt or shift or win):          # Tab
                 pick = 0
-            elif ctrl and not (alt or shift or win) and 0x31 <= vk < 0x31 + len(self.shown):  # Ctrl+1..3
-                pick = vk - 0x31
+            elif not (ctrl or alt or shift or win):
+                n = len(self.shown)
+                if 0x31 <= vk < 0x31 + n:              # 1..5 on the number row
+                    pick = vk - 0x31
+                elif 0x61 <= vk < 0x61 + n:            # 1..5 on the numpad
+                    pick = vk - 0x61
             if pick is not None:
                 choice = self.shown[pick]
                 self.swallow_up.add(vk)
@@ -1386,9 +1390,10 @@ class Predictions:
         for i, (label, hint, cmd) in enumerate(items):
             cell = tk.Frame(self.strip_box, bg=FIELD if i == 0 else BG, cursor="hand2" if cmd else "")
             cell.pack(side="left", padx=(0 if i == 0 else 3, 0))
-            parts = [tk.Label(cell, text=label, bg=cell["bg"], fg=FG, font=FONT, padx=4)]
-            if hint:
-                parts.append(tk.Label(cell, text=hint, bg=cell["bg"], fg=MUTED, font=(FONT[0], FONT[1] - 2)))
+            parts = []
+            if hint:                                   # the key that picks it, before the word
+                parts.append(tk.Label(cell, text=hint, bg=cell["bg"], fg=ACCENT, font=FONT_B, padx=2))
+            parts.append(tk.Label(cell, text=label, bg=cell["bg"], fg=FG, font=FONT, padx=4))
             for w in parts:
                 w.pack(side="left")
             if cmd:
@@ -1431,8 +1436,7 @@ class Predictions:
             log("predict: strip failed:\n" + traceback.format_exc())
 
     def _show(self, words, point):
-        hints = ["Tab", "Ctrl+2", "Ctrl+3"]
-        items = [(w, hints[i] if i < len(hints) else "",
+        items = [(w, str(i + 1),
                   lambda c=(w, ins): threading.Thread(target=self.accept, args=(c,), daemon=True).start())
                  for i, (w, ins) in enumerate(words)]
         self.fill(items)
@@ -1472,14 +1476,17 @@ class App:
             except Exception:
                 log("predict: could not start:\n" + traceback.format_exc())
             # OS-level hotkeys: exact combos only, never fire from normal typing or clicks
+            hotkeys = {1: (0x2 | 0x1, 0x20, self.on_hotkey)}                  # Ctrl+Alt+Space
             if self.predictions:
-                hotkeys = {2: (0x2 | 0x1, ord("P"), self.predictions.toggle)}  # Ctrl+Alt+P
-                threading.Thread(target=windows_hotkey_loop, args=(hotkeys,), daemon=True).start()
-        self.double_ctrl = DoubleCtrl(self.on_hotkey)                        # tap Ctrl twice
+                hotkeys[2] = (0x2 | 0x1, ord("P"), self.predictions.toggle)    # Ctrl+Alt+P
+                self.double_ctrl = DoubleCtrl(self.predictions.toggle)         # double-tap Ctrl
+            threading.Thread(target=windows_hotkey_loop, args=(hotkeys,), daemon=True).start()
+        else:
+            keyboard.GlobalHotKeys({HOTKEY: self.on_hotkey}).start()
         print(f"Careter running ({MODEL}). Press {HOTKEY} anywhere. Ctrl+C here to quit.")
         if self.predictions:
             print(f"Word prediction: {'on' if PREDICT else 'off'} ({PREDICT_HOTKEY} toggles). "
-                  "Tab or Ctrl+1/2/3 picks a word.")
+                  "Keys 1-5 (or Tab for the first) pick a word.")
 
     def pump(self):
         while not self.q.empty():
@@ -1586,7 +1593,7 @@ class DoubleCtrl:
 
 def windows_hotkey_loop(hotkeys):
     """Register hotkeys with Windows itself (RegisterHotKey) and wait for them.
-    hotkeys = {id: (modifiers, virtual key, callback)}, e.g. Ctrl+Alt+P.
+    hotkeys = {id: (modifiers, virtual key, callback)}, e.g. Ctrl+Alt+Space.
     Unlike a keyboard hook this can't get 'stuck' thinking Ctrl/Alt are held."""
     import ctypes
     from ctypes import wintypes
