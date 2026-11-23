@@ -599,6 +599,11 @@ BG, FIELD, FG, MUTED, ACCENT, RED = "#1e1b2e", "#2a2640", "#f4f4f5", "#a1a1aa", 
 FONT = ("Segoe UI", 10) if IS_WIN else ("Helvetica", 12)
 FONT_B = (FONT[0], FONT[1], "bold")
 WRAP = 380
+# word-prediction strip: a rounded slate-grey pill with white words
+STRIP_BG, STRIP_BORDER, STRIP_FG, STRIP_NUM = "#2b2e35", "#4b505a", "#ffffff", "#8f96a3"
+STRIP_FONT = ("Segoe UI", 11) if IS_WIN else ("Helvetica", 13)
+STRIP_NUM_FONT = ("Segoe UI", 9) if IS_WIN else ("Helvetica", 11)
+STRIP_RADIUS = 14
 
 
 class Session:
@@ -1368,9 +1373,9 @@ class Predictions:
         win = self.strip = tk.Toplevel(self.app.root)
         win.overrideredirect(True)
         win.attributes("-topmost", True)
-        win.configure(bg=ACCENT)
-        self.strip_box = tk.Frame(win, bg=BG, padx=4, pady=2)
-        self.strip_box.pack(padx=1, pady=1)
+        win.configure(bg=STRIP_BG)
+        self.strip_box = tk.Frame(win, bg=STRIP_BG, padx=12, pady=6)
+        self.strip_box.pack()
         win.geometry("+-2000+-2000")
         win.update_idletasks()
         self.strip_hwnd = w.GetAncestor(win.winfo_id(), 2)          # GA_ROOT
@@ -1383,17 +1388,50 @@ class Predictions:
             pass
         w.ShowWindow(self.strip_hwnd, 0)            # SW_HIDE
         self.strip_checked = False
+        self.round_native = self.round_corners()
+
+    def round_corners(self):
+        """Windows 11: smooth rounded corners and a thin border drawn by the system. True if it worked;
+        otherwise place_strip clips the window to a rounded shape (Windows 10)."""
+        import ctypes
+        from ctypes import wintypes as W
+        try:
+            dwm = ctypes.WinDLL("dwmapi")
+            dwm.DwmSetWindowAttribute.argtypes = [W.HWND, W.DWORD, ctypes.c_void_p, W.DWORD]
+            DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND, DWMWA_BORDER_COLOR = 33, 2, 34
+            pref = ctypes.c_int(DWMWCP_ROUND)
+            if dwm.DwmSetWindowAttribute(self.strip_hwnd, DWMWA_WINDOW_CORNER_PREFERENCE,
+                                         ctypes.byref(pref), 4) != 0:
+                return False
+            r, g, b = (int(STRIP_BORDER[i:i + 2], 16) for i in (1, 3, 5))
+            color = W.DWORD(r | g << 8 | b << 16)                        # COLORREF is 0x00BBGGRR
+            dwm.DwmSetWindowAttribute(self.strip_hwnd, DWMWA_BORDER_COLOR, ctypes.byref(color), 4)
+            return True
+        except Exception:
+            return False
+
+    def clip_round(self, width, height):
+        import ctypes
+        from ctypes import wintypes as W
+        gdi = ctypes.WinDLL("gdi32")
+        gdi.CreateRoundRectRgn.argtypes = [ctypes.c_int] * 6
+        gdi.CreateRoundRectRgn.restype = W.HANDLE
+        self.w.SetWindowRgn.argtypes = [W.HWND, W.HANDLE, W.BOOL]
+        d = STRIP_RADIUS * 2
+        rgn = gdi.CreateRoundRectRgn(0, 0, width + 1, height + 1, d, d)
+        self.w.SetWindowRgn(self.strip_hwnd, rgn, True)              # Windows owns the region now
 
     def fill(self, items):
         for child in self.strip_box.winfo_children():
             child.destroy()
         for i, (label, hint, cmd) in enumerate(items):
-            cell = tk.Frame(self.strip_box, bg=FIELD if i == 0 else BG, cursor="hand2" if cmd else "")
-            cell.pack(side="left", padx=(0 if i == 0 else 3, 0))
+            cell = tk.Frame(self.strip_box, bg=STRIP_BG, cursor="hand2" if cmd else "")
+            cell.pack(side="left", padx=(0 if i == 0 else 14, 0))
             parts = []
             if hint:                                   # the key that picks it, before the word
-                parts.append(tk.Label(cell, text=hint, bg=cell["bg"], fg=ACCENT, font=FONT_B, padx=2))
-            parts.append(tk.Label(cell, text=label, bg=cell["bg"], fg=FG, font=FONT, padx=4))
+                parts.append(tk.Label(cell, text=hint, bg=STRIP_BG, fg=STRIP_NUM, font=STRIP_NUM_FONT))
+            weight = (STRIP_FONT[0], STRIP_FONT[1], "bold") if (i == 0 and hint) else STRIP_FONT
+            parts.append(tk.Label(cell, text=label, bg=STRIP_BG, fg=STRIP_FG, font=weight, padx=3))
             for w in parts:
                 w.pack(side="left")
             if cmd:
@@ -1412,6 +1450,8 @@ class Predictions:
         before = w.GetForegroundWindow()
         self.strip.geometry(f"+{int(x)}+{int(y)}")
         self.strip.update_idletasks()
+        if not self.round_native:
+            self.clip_round(w_, h)
         w.ShowWindow(self.strip_hwnd, 4)                             # SW_SHOWNOACTIVATE
         SWP_NOSIZE, SWP_NOMOVE, SWP_NOACTIVATE = 0x1, 0x2, 0x10
         w.SetWindowPos(self.strip_hwnd, -1, 0, 0, 0, 0, SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE)  # topmost
@@ -1419,7 +1459,7 @@ class Predictions:
         if not self.strip_checked:                  # once per run: did it really appear?
             self.strip_checked = True
             log(f"predict: strip visible={bool(w.IsWindowVisible(self.strip_hwnd))} at {int(x)},{int(y)} "
-                f"size {w_}x{h}")
+                f"size {w_}x{h}, corners={'windows11' if self.round_native else 'clipped'}")
 
     def keep_focus(self, hwnd):
         """If showing the strip stole focus, hand it straight back so typing keeps working."""
