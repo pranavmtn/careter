@@ -4,7 +4,7 @@ An AI that lives at your cursor. Point at any spot on screen (a terminal, an ebo
 
 ## How it works
 
-1. Put your pointer somewhere and press **Ctrl+Alt+Space**.
+1. Put your pointer somewhere and **tap Ctrl twice** quickly.
 2. A popup opens next to it. Type the goal or click 🎤 to say it.
 3. The model (GPT-6 Luna by default) gets a screenshot with a red crosshair at your spot plus a zoomed crop.
 4. It shows the planned actions (`type: git status`, `press: enter`) and waits for **Run** or **Stop**. Risky actions are flagged in red.

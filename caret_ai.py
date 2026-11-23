@@ -6,7 +6,7 @@ hotkey, then type or speak what you want. It screenshots the screen with a
 marker at that spot, reads the text around it, proposes actions, asks you to
 confirm, runs them, looks at the result, and keeps going until done.
 
-Hotkey:  Ctrl+Alt+Space   (change HOTKEY below)
+Hotkey:  tap Ctrl twice quickly   (see DoubleCtrl)
 Abort:   Esc in the popup, or slam the mouse into a screen corner while it types.
 """
 import base64
@@ -50,7 +50,7 @@ def load_env_file():
 load_env_file()
 MODEL = os.getenv("CARET_AI_MODEL", "gpt-6-luna")
 TRANSCRIBE_MODEL = os.getenv("CARET_AI_STT", "whisper-1")
-HOTKEY = "<ctrl>+<alt>+<space>"
+HOTKEY = "Ctrl Ctrl (double-tap)"
 MAX_STEPS = 12          # max look -> act cycles per request
 FOCUS_CLICK = True      # click the chosen spot before typing, to give it focus back
 SAMPLE_RATE = 16000
@@ -214,7 +214,7 @@ def paste(text):
 
 
 def wait_for_hotkey_release(timeout=1.5):
-    """Don't send keys while the user still holds Ctrl+Alt+Space."""
+    """Don't send keys while the user still holds the hotkey keys."""
     if IS_WIN:
         import ctypes
         user32 = ctypes.windll.user32
@@ -1457,12 +1457,10 @@ class App:
             except Exception:
                 log("predict: could not start:\n" + traceback.format_exc())
             # OS-level hotkeys: exact combos only, never fire from normal typing or clicks
-            hotkeys = {1: (0x2 | 0x1, 0x20, self.on_hotkey)}                  # Ctrl+Alt+Space
             if self.predictions:
-                hotkeys[2] = (0x2 | 0x1, ord("P"), self.predictions.toggle)    # Ctrl+Alt+P
-            threading.Thread(target=windows_hotkey_loop, args=(hotkeys,), daemon=True).start()
-        else:
-            keyboard.GlobalHotKeys({HOTKEY: self.on_hotkey}).start()
+                hotkeys = {2: (0x2 | 0x1, ord("P"), self.predictions.toggle)}  # Ctrl+Alt+P
+                threading.Thread(target=windows_hotkey_loop, args=(hotkeys,), daemon=True).start()
+        self.double_ctrl = DoubleCtrl(self.on_hotkey)                        # tap Ctrl twice
         print(f"Careter running ({MODEL}). Press {HOTKEY} anywhere. Ctrl+C here to quit.")
         if self.predictions:
             print(f"Word prediction: {'on' if PREDICT else 'off'} ({PREDICT_HOTKEY} toggles). "
@@ -1528,9 +1526,52 @@ class App:
             pass
 
 
+class DoubleCtrl:
+    """Calls back when Ctrl is tapped twice quickly: press-release, press-release, with no other key
+    in between. Holding Ctrl for a shortcut (Ctrl+C, Ctrl+V…) never counts, and neither do keys that
+    Careter itself types."""
+    TAP_MAX = 0.30      # seconds Ctrl may be held for one tap
+    GAP_MAX = 0.40      # max seconds between the two taps
+
+    def __init__(self, callback):
+        self.callback = callback
+        self.down_at, self.clean, self.last_tap = None, False, 0.0
+        kw = {}
+        if IS_WIN:      # skip injected keys (LLKHF_INJECTED), e.g. our own Ctrl+C / Ctrl+V
+            kw["win32_event_filter"] = lambda msg, data: not (data.flags & 0x10)
+        self.listener = keyboard.Listener(on_press=self.press, on_release=self.release, **kw)
+        self.listener.start()
+
+    @staticmethod
+    def is_ctrl(key):
+        K = keyboard.Key
+        return key in (K.ctrl, K.ctrl_l, K.ctrl_r)
+
+    def press(self, key):
+        if self.is_ctrl(key):
+            if self.down_at is None:            # ignore auto-repeat while held
+                self.down_at, self.clean = time.time(), True
+        else:                                   # any other key: it's a shortcut, not a tap
+            self.clean, self.last_tap = False, 0.0
+
+    def release(self, key):
+        if not self.is_ctrl(key) or self.down_at is None:
+            return
+        now = time.time()
+        tap = self.clean and now - self.down_at <= self.TAP_MAX
+        self.down_at = None
+        if not tap:
+            self.last_tap = 0.0
+        elif now - self.last_tap <= self.GAP_MAX:
+            self.last_tap = 0.0
+            threading.Thread(target=self.callback, daemon=True).start()
+        else:
+            self.last_tap = now
+
+
 def windows_hotkey_loop(hotkeys):
     """Register hotkeys with Windows itself (RegisterHotKey) and wait for them.
-    hotkeys = {id: (modifiers, virtual key, callback)}, e.g. Ctrl+Alt+Space.
+    hotkeys = {id: (modifiers, virtual key, callback)}, e.g. Ctrl+Alt+P.
     Unlike a keyboard hook this can't get 'stuck' thinking Ctrl/Alt are held."""
     import ctypes
     from ctypes import wintypes
