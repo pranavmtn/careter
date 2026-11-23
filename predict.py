@@ -22,7 +22,7 @@ MAX_CHARS = 400                          # text before the caret fed to the mode
 class LocalLM:
     """A Hugging Face causal LM (use a *base* model, not a chat model)."""
 
-    def __init__(self, name="HuggingFaceTB/SmolLM2-135M", threads=4, max_ctx_tokens=96):
+    def __init__(self, name="HuggingFaceTB/SmolLM2-135M", threads=2, max_ctx_tokens=96):
         import torch
         from transformers import AutoModelForCausalLM, AutoTokenizer
         torch.set_num_threads(threads)

@@ -122,7 +122,7 @@ Rules:
 def capture(anchor):
     """Screenshot the monitor under the pointer, mark the pointer, return (full, crop) as JPEG data URLs."""
     x, y = anchor
-    with mss.mss() as sct:
+    with getattr(mss, "MSS", mss.mss)() as sct:
         mon = next(
             (m for m in sct.monitors[1:]
              if m["left"] <= x < m["left"] + m["width"] and m["top"] <= y < m["top"] + m["height"]),
@@ -472,7 +472,7 @@ def window_title(hwnd):
 
 
 def monitor_bounds(x, y):
-    with mss.mss() as sct:
+    with getattr(mss, "MSS", mss.mss)() as sct:
         m = next((m for m in sct.monitors[1:]
                   if m["left"] <= x < m["left"] + m["width"] and m["top"] <= y < m["top"] + m["height"]),
                  sct.monitors[1])
@@ -1324,6 +1324,11 @@ class Predictions:
         GWL_EXSTYLE, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW = -20, 0x08000000, 0x80
         style = self.user32.GetWindowLongW(self.strip_hwnd, GWL_EXSTYLE)
         self.user32.SetWindowLongW(self.strip_hwnd, GWL_EXSTYLE, style | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW)
+        try:
+            win.attributes("-disabled", True)       # a disabled window can't take keyboard focus
+        except tk.TclError:
+            pass
+        self.user32.EnableWindow(self.strip_hwnd, False)
         self.user32.ShowWindow(self.strip_hwnd, 0)
 
     def fill(self, items):
@@ -1350,9 +1355,17 @@ class Predictions:
         x = max(left, min(x, right - w))
         self.strip_rect = (x, y, x + w, y + h)
         SWP_NOSIZE, SWP_NOACTIVATE, SWP_SHOWWINDOW = 0x1, 0x10, 0x40
+        before = self.user32.GetForegroundWindow()
+        self.strip.geometry(f"+{int(x)}+{int(y)}")
         self.user32.SetWindowPos(self.strip_hwnd, -1, int(x), int(y), 0, 0,     # -1 = HWND_TOPMOST
                                  SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW)
-        self.strip.geometry(f"+{int(x)}+{int(y)}")
+        self.keep_focus(before)
+
+    def keep_focus(self, hwnd):
+        """If showing the strip stole focus, hand it straight back so typing keeps working."""
+        if hwnd and hwnd != self.strip_hwnd and self.user32.GetForegroundWindow() == self.strip_hwnd:
+            log("predict: strip took focus, giving it back")
+            self.user32.SetForegroundWindow(hwnd)
 
     def show(self, words, point, gen):
         if gen != self.gen or not self.strip:
