@@ -390,16 +390,63 @@ def edits1(w):
     return set(deletes + swaps + replaces + inserts)
 
 
+# Typos so common online that they show up in word lists as "words": always corrected.
+COMMON_TYPOS = {
+    "teh": "the", "hte": "the", "thw": "the", "tje": "the", "adn": "and", "nad": "and", "anf": "and",
+    "taht": "that", "tht": "that", "thta": "that", "waht": "what", "whta": "what", "wiht": "with",
+    "wtih": "with", "jsut": "just", "juts": "just", "thier": "their", "theyre": "they're",
+    "becuase": "because", "becasue": "because", "beacuse": "because", "recieve": "receive",
+    "recieved": "received", "beleive": "believe", "wierd": "weird", "freind": "friend",
+    "freinds": "friends", "untill": "until", "occured": "occurred", "seperate": "separate",
+    "definately": "definitely", "goverment": "government", "tommorow": "tomorrow",
+    "tommorrow": "tomorrow", "tomorow": "tomorrow", "realy": "really", "alot": "a lot",
+    "dont": "don't", "doesnt": "doesn't", "didnt": "didn't", "cant": "can't", "wont": "won't",
+    "isnt": "isn't", "wasnt": "wasn't", "im": "I'm", "ive": "I've", "youre": "you're",
+    "knwo": "know", "konw": "know", "nwo": "now", "ot": "to", "fo": "of", "fro": "for", "ofr": "for",
+    "yuo": "you", "yoru": "your", "abotu": "about", "aboutt": "about", "woudl": "would",
+    "coudl": "could", "shoudl": "should", "whihc": "which", "wehn": "when", "becaus": "because",
+    "pleae": "please", "plese": "please", "pls": "please", "thnaks": "thanks", "thansk": "thanks",
+    "msot": "most", "frist": "first", "thign": "thing", "thigns": "things", "agian": "again",
+}
+
+
+def osa_distance(a, b):
+    """Edit distance counting a swap of neighbouring letters as one edit."""
+    d = [[0] * (len(b) + 1) for _ in range(len(a) + 1)]
+    for i in range(len(a) + 1):
+        d[i][0] = i
+    for j in range(len(b) + 1):
+        d[0][j] = j
+    for i in range(1, len(a) + 1):
+        for j in range(1, len(b) + 1):
+            cost = a[i - 1] != b[j - 1]
+            d[i][j] = min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + cost)
+            if i > 1 and j > 1 and a[i - 1] == b[j - 2] and a[i - 2] == b[j - 1]:
+                d[i][j] = min(d[i][j], d[i - 2][j - 2] + 1)
+    return d[len(a)][len(b)]
+
+
 class Speller:
-    """Fixes clear one-letter typos using the word-frequency list. Conservative on purpose:
-    lowercase words of 3+ letters only (no names, ACRONYMS or numbers), and words you undo are
-    remembered in user_words.txt and never corrected again."""
+    """Fixes typos using the word-frequency list: famous typos (teh -> the) always, one-letter
+    mistakes, and two-letter mistakes in words of 7+ letters. Conservative on purpose: lowercase
+    words only (no names, ACRONYMS or numbers), and words you undo are remembered in
+    user_words.txt and never corrected again."""
     COMMON = 40_000     # words more common than this rank are never "corrected"
     RARE_TO = 3_000     # a rare-but-real word is only swapped for a very common one
+    TARGET1 = 30_000      # a one-letter fix only aims at the 30k most common words
+    EDIT2_WORDS = 15_000  # two-letter fixes only aim at the 15k most common words
+    EDIT2_MIN_LEN = 7     # ...and only for words this long (shorter ones have too many neighbours)
 
     def __init__(self, ngram, folder):
         self.ng = ngram
         self.rank = {w: i for i, w in enumerate(ngram.words)}
+        # Index for two-letter fixes: every target word under itself and each one-letter deletion.
+        # A typo two edits away shares a key with one of its own one-edit variants. ~2 ms per lookup.
+        self.dix = {}
+        for i, w in enumerate(ngram.words[: self.EDIT2_WORDS]):
+            if len(w) >= self.EDIT2_MIN_LEN - 2:
+                for k in {w} | {w[:j] + w[j + 1:] for j in range(len(w))}:
+                    self.dix.setdefault(k, []).append(i)
         self.path = os.path.join(folder, "user_words.txt")
         self.user = set()
         if os.path.exists(self.path):
@@ -407,20 +454,37 @@ class Speller:
                 self.user = {line.strip().lower() for line in f if line.strip()}
 
     def correct(self, word, prev=None):
-        if len(word) < 3 or not word.isalpha() or not word.islower():
+        if not word.isalpha() or not word.islower() or word in self.user:
             return None
-        if word in self.user:
+        if word in COMMON_TYPOS:
+            return COMMON_TYPOS[word]
+        if len(word) < 3:
             return None
         r = self.rank.get(word)
         if r is not None and r < self.COMMON:
             return None                                 # a normal word
-        cands = [c for c in edits1(word) if c in self.rank]
-        if r is not None:
-            cands = [c for c in cands if self.rank[c] < self.RARE_TO]
-        if not cands:
-            return None
+        first = lambda c: c[0] == word[0] or c[:2] == word[1::-1]   # typos keep the first letter (or swap the first two)
+
+        def ok(c, top):
+            rc = self.rank.get(c)
+            return rc is not None and rc < (self.RARE_TO if r is not None else top) and first(c)
         follows = set(self.ng.bi.get(prev, [])) if prev else set()
-        return min(cands, key=lambda c: (c not in follows, self.rank[c]))   # fits context, then most common
+        best = lambda cands: min(cands, key=lambda c: (c not in follows, self.rank[c]))  # context, then common
+
+        e1 = edits1(word)
+        cands = [c for c in e1 if ok(c, self.TARGET1)]
+        if cands:
+            return best(cands)
+        if len(word) < self.EDIT2_MIN_LEN:
+            return None
+        found = set()                                   # two letters off
+        for e in e1:
+            for k in {e} | {e[:j] + e[j + 1:] for j in range(len(e))}:
+                for i in self.dix.get(k, ()):
+                    found.add(self.ng.words[i])
+        cands = [c for c in found if ok(c, self.EDIT2_WORDS) and abs(len(c) - len(word)) <= 2
+                 and osa_distance(word, c) <= 2]
+        return best(cands) if cands else None
 
     def remember(self, word):
         word = word.lower()
