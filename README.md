@@ -21,6 +21,27 @@ An AI that lives at your cursor. Point at any spot on screen (a terminal, an ebo
 
 When the bubble opens it first says what it sees and offers 2–4 one-click next actions; you can also type or speak your own. Settings (`CONTEXT_CHARS`, `SECTION_BREAKS`, `AUTO_SUGGEST`) are at the top of `caret_ai.py`.
 
+## Word prediction (Windows, local, no API key)
+
+While you type anywhere, Careter suggests the next word, or the rest of the word you're typing, in a small strip at the caret:
+
+- **Tab** inserts the first suggestion. **Ctrl+2 / Ctrl+3** (or a click) picks another. After you accept, it suggests the word after that.
+- Keep typing or press **Esc** and the strip goes away. Tab and Ctrl+digit behave normally whenever the strip isn't showing.
+- **Ctrl+Alt+P** turns prediction on and off.
+
+Two engines, both local and free (neither uses the OpenAI key). What you type stays in memory on your PC and is never logged. It never runs in password boxes, in terminals (`PREDICT_IN_TERMINALS`), or inside Careter's own bubble.
+
+- **`ngram` (default): instant.** Counts of the most common English words and word pairs (Peter Norvig's lists from Google's Web 1T data, about 10 MB, downloaded once into `careter/ngrams/`). It completes the word you're typing and predicts the next word from the one before.
+- **`llm`: smarter, heavier.** A small open-source model (`HuggingFaceTB/SmolLM2-135M`) in its own low-priority process. Install `pip install -r requirements-llm.txt` and set `CARET_PREDICT_ENGINE=llm`. Turning an LLM's next-*token* guesses into words is done in `predict.py`.
+
+| Env var | Default | Purpose |
+|---|---|---|
+| `CARET_PREDICT` | `1` | `0` starts with prediction off |
+| `CARET_PREDICT_ENGINE` | `ngram` | `ngram` or `llm` |
+| `CARET_PREDICT_MODEL` | `HuggingFaceTB/SmolLM2-135M` | For `llm`: any Hugging Face **base** (not chat) causal LM |
+
+In Chrome and other apps that don't report their caret position, the strip appears at the mouse pointer.
+
 ## Install (one command)
 
 These clone Careter into your home folder, install dependencies, ask for your OpenAI key (saved to `careter/.env`), and set it to start at login.

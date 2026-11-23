@@ -32,7 +32,7 @@ import pyperclip
 import sounddevice as sd
 from openai import OpenAI
 from PIL import Image, ImageDraw
-from pynput import keyboard
+from pynput import keyboard, mouse
 
 # ---------------------------------------------------------------- settings
 def load_env_file():
@@ -59,6 +59,15 @@ USE_SCREENSHOTS = False # text-only for now: the AI reads only the text at the c
 DEBUG = True            # show the live log inside the bubble (toggle with 🐞)
 SECTION_BREAKS = True   # stop reading at a blank line (treat it as the end of the section)
 AUTO_SUGGEST = True     # when the bubble opens, analyse the spot and offer next actions
+
+# Word prediction while you type (Windows). Runs a small local model: no API key, nothing leaves the PC.
+PREDICT = os.getenv("CARET_PREDICT", "1") != "0"
+PREDICT_ENGINE = os.getenv("CARET_PREDICT_ENGINE", "ngram")  # "ngram" (instant, word counts) or "llm"
+PREDICT_MODEL = os.getenv("CARET_PREDICT_MODEL", "HuggingFaceTB/SmolLM2-135M")   # llm engine: a *base* model
+PREDICT_DELAY = 0.18          # seconds of no typing before suggestions appear
+PREDICT_COUNT = 3             # suggestions shown
+PREDICT_IN_TERMINALS = False  # shell commands aren't prose; off by default
+PREDICT_HOTKEY = "Ctrl+Alt+P" # turns predictions on/off
 
 IS_MAC = platform.system() == "Darwin"
 IS_WIN = platform.system() == "Windows"
@@ -114,7 +123,7 @@ Rules:
 def capture(anchor):
     """Screenshot the monitor under the pointer, mark the pointer, return (full, crop) as JPEG data URLs."""
     x, y = anchor
-    with mss.mss() as sct:
+    with getattr(mss, "MSS", mss.mss)() as sct:
         mon = next(
             (m for m in sct.monitors[1:]
              if m["left"] <= x < m["left"] + m["width"] and m["top"] <= y < m["top"] + m["height"]),
@@ -170,7 +179,7 @@ def _vk(key):
         return 0x6F + int(key[1:])
     if len(key) == 1:
         import ctypes
-        code = ctypes.windll.user32.VkKeyScanW(ord(key))
+        code = ctypes.windll.user32.VkKeyScanW(ctypes.c_wchar(key))
         return code & 0xFF if code != -1 else None
     return None
 
@@ -311,6 +320,48 @@ def read_text_context(chars=CONTEXT_CHARS):
     return trim_context(before, selected, after, chars)
 
 
+def read_before_caret(chars=300):
+    """For word prediction: (text before the caret, caret screen point (x, top, bottom) or None,
+    is_password). Read-only (never moves the caret). None if the app doesn't expose its text."""
+    if not IS_WIN:
+        return None
+    import uiautomation as auto
+    with auto.UIAutomationInitializerInThread():
+        ctrl, tp = auto.GetFocusedControl(), None
+        if ctrl is None:
+            return None
+        try:
+            if ctrl.IsPassword:
+                return "", None, True
+        except Exception:
+            pass
+        for _ in range(6):
+            if not ctrl:
+                break
+            tp = ctrl.GetPattern(auto.PatternId.TextPattern)
+            if tp:
+                break
+            ctrl = ctrl.GetParentControl()
+        sel = tp.GetSelection() if tp else None
+        if not sel:
+            return None
+        caret = sel[0]
+        START, END = auto.TextPatternRangeEndpoint.Start, auto.TextPatternRangeEndpoint.End
+        b = caret.Clone()
+        b.MoveEndpointByRange(END, caret, START)
+        b.MoveEndpointByUnit(START, auto.TextUnit.Character, -chars)
+        text = b.GetText(chars * 4).replace("\r\n", "\n").replace("\r", "\n")
+        point = None
+        try:
+            rects = b.GetBoundingRectangles()
+            if rects:
+                r = rects[-1]                          # the line the caret is on
+                point = (r.right, r.top, r.bottom)
+        except Exception:
+            pass
+    return text, point, False
+
+
 def trim_context(before, selected, after, chars=CONTEXT_CHARS):
     """Keep N characters each side of the caret, only within the current section."""
     before, after = before.replace("\r\n", "\n"), after.replace("\r\n", "\n")
@@ -422,7 +473,7 @@ def window_title(hwnd):
 
 
 def monitor_bounds(x, y):
-    with mss.mss() as sct:
+    with getattr(mss, "MSS", mss.mss)() as sct:
         m = next((m for m in sct.monitors[1:]
                   if m["left"] <= x < m["left"] + m["width"] and m["top"] <= y < m["top"] + m["height"]),
                  sct.monitors[1])
@@ -1050,6 +1101,313 @@ class Session:
             self.app.session = None
 
 
+class Predictions:
+    """Next-word suggestions while you type, from a small local model (predict.py).
+
+    A keyboard hook keeps a short buffer of what you typed in the current window. After a short
+    pause it reads the text before the caret (UI Automation, or the buffer if the app hides its
+    text), asks the model for the next words and shows them in a strip at the caret that never
+    takes focus. Tab inserts the first, Ctrl+1/2/3 (or a click) picks one. Those keys are only
+    captured while the strip is showing. Typed text stays in memory and is never logged."""
+
+    BUF_MAX = 400
+
+    def __init__(self, app):
+        import ctypes
+        self.user32 = ctypes.windll.user32
+        self.app = app
+        self.enabled = PREDICT
+        self.predictor = None
+        self.buf, self.buf_hwnd = "", None
+        self.shown, self.visible = [], False
+        self.gen = 0                       # bumps on every keystroke; stale predictions are dropped
+        self.timer = None
+        self.swallow_up = set()            # keys whose key-up we also hide from the app
+        self.strip = None
+        self.strip_rect = (0, 0, 0, 0)
+        app.q.put(self.build_strip)
+        threading.Thread(target=self.load, daemon=True).start()
+        self.kb = keyboard.Listener(on_press=self.on_press, win32_event_filter=self.filter)
+        self.kb.start()
+        self.ms = mouse.Listener(on_click=self.on_click)
+        self.ms.start()
+
+    # --- model
+    def load(self):
+        if not self.enabled:
+            return
+        try:
+            t0 = time.time()
+            if PREDICT_ENGINE == "llm":
+                log(f"predict: loading {PREDICT_MODEL} (first run downloads it)…")
+                from predict import PredictorProcess
+                self.predictor = PredictorProcess(PREDICT_MODEL)   # model runs in its own process
+            else:
+                log("predict: loading word lists…")
+                from predict import NGramPredictor
+                folder = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ngrams")
+                self.predictor = NGramPredictor(folder, log=log)
+            warm = self.predictor.predict("Hello, how are ")      # warm-up
+            log(f"predict: ready in {time.time() - t0:.1f}s, test: {[w for w, _ in warm]}")
+        except Exception as e:
+            if "No module named" in str(e) and PREDICT_ENGINE == "llm":
+                log("predict: off. It needs torch + transformers: pip install -r requirements.txt")
+            else:
+                log("predict: model failed to load:\n" + traceback.format_exc())
+
+    def toggle(self):
+        self.enabled = not self.enabled
+        self.reset()
+        log(f"predict: {'on' if self.enabled else 'off'}")
+        if self.enabled and self.predictor is None:
+            threading.Thread(target=self.load, daemon=True).start()
+        x, y = pyautogui.position()
+        self.app.q.put(lambda: self.flash(f"Word prediction {'on' if self.enabled else 'off'}", (x, y, y + 16)))
+
+    # --- keyboard
+    def mods(self):
+        down = lambda vk: bool(self.user32.GetAsyncKeyState(vk) & 0x8000)
+        return down(0x11), down(0x12), down(0x10), down(0x5B) or down(0x5C)   # ctrl, alt, shift, win
+
+    def filter(self, msg, data):
+        """Runs inside the low-level hook (must be quick). Returns False to skip on_press."""
+        if data.flags & 0x10:                  # LLKHF_INJECTED: keys we (or other tools) typed
+            return False
+        vk, down = data.vkCode, msg in (0x100, 0x104)          # WM_KEYDOWN, WM_SYSKEYDOWN
+        if not down and vk in self.swallow_up:
+            self.swallow_up.discard(vk)
+            self.kb.suppress_event()
+        if down and self.visible and self.shown:
+            ctrl, alt, shift, win = self.mods()
+            pick = None
+            if vk == 0x09 and not (ctrl or alt or shift or win):          # Tab
+                pick = 0
+            elif ctrl and not (alt or shift or win) and 0x31 <= vk < 0x31 + len(self.shown):  # Ctrl+1..3
+                pick = vk - 0x31
+            if pick is not None:
+                choice = self.shown[pick]
+                self.swallow_up.add(vk)
+                threading.Thread(target=self.accept, args=(choice,), daemon=True).start()
+                self.kb.suppress_event()       # the app never sees this key
+        return True
+
+    def on_press(self, key):
+        if not self.enabled:
+            return
+        if not getattr(self, "seen_key", False):
+            self.seen_key = True
+            log("predict: keyboard hook is receiving keys")
+        hwnd = self.user32.GetForegroundWindow()
+        if hwnd != self.buf_hwnd:              # another window: what we typed before doesn't apply
+            self.buf, self.buf_hwnd = "", hwnd
+        K = keyboard.Key
+        if key in (K.shift, K.shift_r, K.caps_lock, K.ctrl, K.ctrl_l, K.ctrl_r,
+                   K.alt, K.alt_l, K.alt_r, K.alt_gr, K.cmd, K.cmd_r):
+            return                             # a modifier on its own changes nothing
+        ctrl, alt, _, win = self.mods()
+        char = getattr(key, "char", None)
+        if key == K.backspace and not (ctrl or alt):
+            self.buf = self.buf[:-1]
+        elif key == K.space and not (ctrl or alt or win):
+            self.buf += " "
+        elif key == K.enter and not (ctrl or alt):
+            self.buf += "\n"
+        elif char and char.isprintable() and not win and (ctrl == alt):   # ctrl+alt = AltGr chars
+            self.buf += char
+        else:                                  # arrows, Home, Esc, shortcuts (Ctrl+V…): caret/text unknown
+            self.reset()
+            return
+        self.buf = self.buf[-self.BUF_MAX:]
+        self.schedule()
+
+    def on_click(self, x, y, button, pressed):
+        if not pressed:
+            return
+        l, t, r, b = self.strip_rect
+        if self.visible and l <= x < r and t <= y < b:
+            return                             # a click on our own strip
+        self.reset()                           # the caret probably moved
+
+    def reset(self):
+        self.buf = ""
+        self.gen += 1
+        if self.timer:
+            self.timer.cancel()
+        self.hide()
+
+    def schedule(self):
+        self.gen += 1
+        self.hide()
+        if self.timer:
+            self.timer.cancel()
+        self.timer = threading.Timer(PREDICT_DELAY, self.run, args=(self.gen,))
+        self.timer.daemon = True
+        self.timer.start()
+
+    # --- predict
+    def run(self, gen):
+        """Never logs what you typed: only why a suggestion was or wasn't shown."""
+        why = lambda msg: DEBUG and log("predict: " + msg)
+        try:
+            if gen != self.gen or not self.enabled:
+                return
+            if not self.predictor:
+                return why("model not loaded yet")
+            hwnd, proc = foreground_window()
+            if self.is_ours(hwnd):
+                return                         # typing in Careter's own bubble
+            if proc in TERMINALS and not PREDICT_IN_TERMINALS:
+                return why(f"skipped, {proc} is a terminal")
+            if self.app.session and self.app.session.acting:
+                return
+            uia = run_with_timeout(lambda: read_before_caret(300), 0.4)
+            if uia and uia[2]:
+                return why("skipped, password box")
+            source = "uia" if uia and uia[0].strip() else "keys"
+            text = uia[0] if source == "uia" else self.buf
+            if gen != self.gen:
+                return
+            if not text.strip():
+                return why(f"no text before caret in {proc} (uia={'yes' if uia else 'no'})")
+            t0 = time.time()
+            words = self.predictor.predict(text, PREDICT_COUNT, cancelled=lambda: gen != self.gen)
+            ms = (time.time() - t0) * 1000
+            if gen != self.gen:
+                return
+            if not words:
+                return why(f"no suggestions ({source}, {len(text)} chars, ends {'space' if text[-1] == ' ' else 'mid-word' if text[-1].isalnum() else 'punct'}, {ms:.0f}ms)")
+            where = "uia"
+            point = uia[1] if uia else None
+            if not point:
+                point, where = caret_rect(), "caret"
+            if not point:
+                mx, my = pyautogui.position()
+                point, where = (mx, my, my + 16), "mouse"
+            why(f"{len(words)} words in {ms:.0f}ms from {source} in {proc}, strip at {where} {point[0]},{point[2]}")
+            self.app.q.put(lambda: self.show(words, point, gen))
+        except Exception:
+            log("predict failed:\n" + traceback.format_exc())
+
+    def is_ours(self, hwnd):
+        from ctypes import wintypes, byref
+        pid = wintypes.DWORD()
+        self.user32.GetWindowThreadProcessId(hwnd, byref(pid))
+        return pid.value == os.getpid()
+
+    def accept(self, choice):
+        word, insert = choice
+        self.gen += 1
+        self.hide()
+        time.sleep(0.03)
+        try:
+            if insert.isascii():
+                pyautogui.write(insert, interval=0.004)
+            else:
+                paste(insert)
+        except Exception:
+            log("predict: insert failed:\n" + traceback.format_exc())
+            return
+        self.buf = (self.buf + insert)[-self.BUF_MAX:]
+        self.schedule()                        # offer the word after it straight away
+
+    # --- the strip (UI thread only)
+    def build_strip(self):
+        try:
+            self._build_strip()
+            log("predict: strip window ready")
+        except Exception:
+            self.strip = None
+            log("predict: strip window failed:\n" + traceback.format_exc())
+
+    def _build_strip(self):
+        win = self.strip = tk.Toplevel(self.app.root)
+        win.overrideredirect(True)
+        win.attributes("-topmost", True)
+        win.configure(bg=ACCENT)
+        self.strip_box = tk.Frame(win, bg=BG, padx=4, pady=2)
+        self.strip_box.pack(padx=1, pady=1)
+        win.geometry("+-2000+-2000")
+        win.update_idletasks()
+        self.strip_hwnd = self.user32.GetAncestor(win.winfo_id(), 2)        # GA_ROOT
+        GWL_EXSTYLE, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW = -20, 0x08000000, 0x80
+        style = self.user32.GetWindowLongW(self.strip_hwnd, GWL_EXSTYLE)
+        self.user32.SetWindowLongW(self.strip_hwnd, GWL_EXSTYLE, style | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW)
+        try:
+            win.attributes("-disabled", True)       # a disabled window can't take keyboard focus
+        except tk.TclError:
+            pass
+        self.user32.EnableWindow(self.strip_hwnd, False)
+        self.user32.ShowWindow(self.strip_hwnd, 0)
+
+    def fill(self, items):
+        for child in self.strip_box.winfo_children():
+            child.destroy()
+        for i, (label, hint, cmd) in enumerate(items):
+            cell = tk.Frame(self.strip_box, bg=FIELD if i == 0 else BG, cursor="hand2" if cmd else "")
+            cell.pack(side="left", padx=(0 if i == 0 else 3, 0))
+            parts = [tk.Label(cell, text=label, bg=cell["bg"], fg=FG, font=FONT, padx=4)]
+            if hint:
+                parts.append(tk.Label(cell, text=hint, bg=cell["bg"], fg=MUTED, font=(FONT[0], FONT[1] - 2)))
+            for w in parts:
+                w.pack(side="left")
+            if cmd:
+                for w in [cell] + parts:
+                    w.bind("<Button-1>", lambda e, c=cmd: c())
+
+    def place_strip(self, point):
+        x, top, bottom = point
+        self.strip.update_idletasks()
+        w, h = self.strip.winfo_reqwidth(), self.strip.winfo_reqheight()
+        left, mtop, right, mbottom = monitor_bounds(x, top)
+        y = bottom + 4 if bottom + 4 + h < mbottom else top - h - 4
+        x = max(left, min(x, right - w))
+        self.strip_rect = (x, y, x + w, y + h)
+        SWP_NOSIZE, SWP_NOACTIVATE, SWP_SHOWWINDOW = 0x1, 0x10, 0x40
+        before = self.user32.GetForegroundWindow()
+        self.strip.geometry(f"+{int(x)}+{int(y)}")
+        self.user32.SetWindowPos(self.strip_hwnd, -1, int(x), int(y), 0, 0,     # -1 = HWND_TOPMOST
+                                 SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW)
+        self.keep_focus(before)
+
+    def keep_focus(self, hwnd):
+        """If showing the strip stole focus, hand it straight back so typing keeps working."""
+        if hwnd and hwnd != self.strip_hwnd and self.user32.GetForegroundWindow() == self.strip_hwnd:
+            log("predict: strip took focus, giving it back")
+            self.user32.SetForegroundWindow(hwnd)
+
+    def show(self, words, point, gen):
+        if gen != self.gen or not self.strip:
+            return
+        try:
+            self._show(words, point)
+        except Exception:
+            log("predict: strip failed:\n" + traceback.format_exc())
+
+    def _show(self, words, point):
+        hints = ["Tab", "Ctrl+2", "Ctrl+3"]
+        items = [(w, hints[i] if i < len(hints) else "",
+                  lambda c=(w, ins): threading.Thread(target=self.accept, args=(c,), daemon=True).start())
+                 for i, (w, ins) in enumerate(words)]
+        self.fill(items)
+        self.shown, self.visible = list(words), True
+        self.place_strip(point)
+
+    def flash(self, text, point):
+        if not self.strip:
+            return
+        self.fill([(text, "", None)])
+        self.shown, self.visible = [], True
+        self.place_strip(point)
+        g = self.gen
+        self.strip.after(1200, lambda: self.gen == g and self.hide())
+
+    def hide(self):
+        was = self.visible
+        self.visible, self.shown = False, []
+        if was and self.strip:
+            self.app.q.put(lambda: self.user32.ShowWindow(self.strip_hwnd, 0))
+
+
 class App:
     def __init__(self):
         self.root = tk.Tk()
@@ -1060,12 +1418,23 @@ class App:
         self.last_trigger = 0.0
         self.log_start = 0
         self.root.after(30, self.pump)
+        self.predictions = None
         if IS_WIN:
-            # OS-level hotkey: exact Ctrl+Alt+Space only, never fires from normal typing or clicks
-            threading.Thread(target=windows_hotkey_loop, args=(self.on_hotkey,), daemon=True).start()
+            try:
+                self.predictions = Predictions(self)
+            except Exception:
+                log("predict: could not start:\n" + traceback.format_exc())
+            # OS-level hotkeys: exact combos only, never fire from normal typing or clicks
+            hotkeys = {1: (0x2 | 0x1, 0x20, self.on_hotkey)}                  # Ctrl+Alt+Space
+            if self.predictions:
+                hotkeys[2] = (0x2 | 0x1, ord("P"), self.predictions.toggle)    # Ctrl+Alt+P
+            threading.Thread(target=windows_hotkey_loop, args=(hotkeys,), daemon=True).start()
         else:
             keyboard.GlobalHotKeys({HOTKEY: self.on_hotkey}).start()
         print(f"Careter running ({MODEL}). Press {HOTKEY} anywhere. Ctrl+C here to quit.")
+        if self.predictions:
+            print(f"Word prediction: {'on' if PREDICT else 'off'} ({PREDICT_HOTKEY} toggles). "
+                  "Tab or Ctrl+1/2/3 picks a word.")
 
     def pump(self):
         while not self.q.empty():
@@ -1081,6 +1450,8 @@ class App:
         if self.triggering or now - self.last_trigger < 0.8:
             return
         self.triggering, self.last_trigger = True, now
+        if self.predictions:
+            self.predictions.reset()                     # hide the word strip under the bubble
         try:
             if self.session and self.session.busy:
                 self.q.put(self.session.grab_focus)      # working: just bring it forward
@@ -1125,20 +1496,28 @@ class App:
             pass
 
 
-def windows_hotkey_loop(callback):
-    """Register Ctrl+Alt+Space with Windows itself (RegisterHotKey) and wait for it.
+def windows_hotkey_loop(hotkeys):
+    """Register hotkeys with Windows itself (RegisterHotKey) and wait for them.
+    hotkeys = {id: (modifiers, virtual key, callback)}, e.g. Ctrl+Alt+Space.
     Unlike a keyboard hook this can't get 'stuck' thinking Ctrl/Alt are held."""
     import ctypes
     from ctypes import wintypes
     user32 = ctypes.windll.user32
-    MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, VK_SPACE, WM_HOTKEY = 0x1, 0x2, 0x4000, 0x20, 0x0312
-    if not user32.RegisterHotKey(None, 1, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, VK_SPACE):
-        print("Could not register Ctrl+Alt+Space: another app is using it.")
+    MOD_NOREPEAT, WM_HOTKEY = 0x4000, 0x0312
+    active = {}
+    for hid, (mods, vk, callback) in hotkeys.items():
+        if user32.RegisterHotKey(None, hid, mods | MOD_NOREPEAT, vk):
+            active[hid] = callback
+        else:
+            msg = f"Could not register hotkey #{hid}: another app is using it."
+            print(msg)
+            log(msg)
+    if not active:
         return
     msg = wintypes.MSG()
     while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
-        if msg.message == WM_HOTKEY:
-            threading.Thread(target=callback, daemon=True).start()
+        if msg.message == WM_HOTKEY and msg.wParam in active:
+            threading.Thread(target=active[msg.wParam], daemon=True).start()
 
 
 def single_instance_lock():
