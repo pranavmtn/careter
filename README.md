@@ -73,6 +73,17 @@ Privacy: everything runs in the browser. Your learned words stay in this browser
 
 For the Chrome Web Store you'd also add icons, put a prebuilt `model.json` in the folder (the extension uses it instead of downloading), and write a privacy policy.
 
+## Always running (Windows)
+
+```powershell
+.\.venv\Scripts\python caret_ai.py --autostart on       # start at sign-in + restart within 5 min if it stops
+.\.venv\Scripts\python caret_ai.py --autostart status
+.\.venv\Scripts\python caret_ai.py --autostart off      # back to manual
+.\.venv\Scripts\python caret_ai.py --stop               # close the running copy (comes back if auto-start is on)
+```
+
+The installer turns auto-start on. It uses a Windows scheduled task named **Careter** (visible in Task Scheduler) running as you, with no admin rights, no time limit, and it keeps going on battery. While auto-start is on, running `python caret_ai.py` by hand just says "already running"; use `--stop` first if you want a console copy for debugging.
+
 ## Install (one command)
 
 These clone Careter into your home folder, install dependencies, ask for your OpenAI key (saved to `careter/.env`), and set it to start at login.

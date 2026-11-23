@@ -1902,6 +1902,105 @@ def single_instance_lock():
     return lock
 
 
+TASK_NAME = "Careter"
+
+
+def _task_xml(with_logon):
+    """A Windows scheduled task that keeps Careter running: start at login, and every 5 minutes start
+    it again if it isn't running (a second copy exits at once: see single_instance_lock)."""
+    from xml.sax.saxutils import escape
+    import datetime
+    here = os.path.dirname(os.path.abspath(__file__))
+    pyw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
+    if not os.path.exists(pyw):
+        pyw = sys.executable
+    user = f"{os.environ.get('USERDOMAIN', '')}\\{os.environ.get('USERNAME', '')}".lstrip("\\")
+    start = datetime.datetime.now().replace(microsecond=0).isoformat()
+    logon = (f"<LogonTrigger><Enabled>true</Enabled><UserId>{escape(user)}</UserId></LogonTrigger>"
+             if with_logon else "")
+    return f"""<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo><Description>Keeps Careter running (starts it at login and restarts it if it stops).</Description></RegistrationInfo>
+  <Triggers>
+    {logon}
+    <TimeTrigger>
+      <Repetition><Interval>PT5M</Interval><StopAtDurationEnd>false</StopAtDurationEnd></Repetition>
+      <StartBoundary>{start}</StartBoundary><Enabled>true</Enabled>
+    </TimeTrigger>
+  </Triggers>
+  <Principals><Principal id="Author"><UserId>{escape(user)}</UserId><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <IdleSettings><StopOnIdleEnd>false</StopOnIdleEnd><RestartOnIdle>false</RestartOnIdle></IdleSettings>
+    <RestartOnFailure><Interval>PT1M</Interval><Count>10</Count></RestartOnFailure>
+    <Enabled>true</Enabled>
+  </Settings>
+  <Actions Context="Author">
+    <Exec><Command>{escape(pyw)}</Command><Arguments>"{escape(os.path.join(here, "caret_ai.py"))}"</Arguments><WorkingDirectory>{escape(here)}</WorkingDirectory></Exec>
+  </Actions>
+</Task>
+"""
+
+
+def _startup_shortcut():
+    return os.path.join(os.environ.get("APPDATA", ""), r"Microsoft\Windows\Start Menu\Programs\Startup",
+                        "Careter.lnk")
+
+
+def autostart_command(mode):
+    """--autostart on|off|status (Windows)."""
+    import subprocess
+    import tempfile
+    if not IS_WIN:
+        print("Auto-start is set up by install.sh on Mac/Linux.")
+        return
+    run = lambda *a: subprocess.run(["schtasks", *a], capture_output=True, text=True)
+    if mode == "status":
+        r = run("/Query", "/TN", TASK_NAME)
+        print("Auto-start: ON (scheduled task 'Careter')" if r.returncode == 0 else "Auto-start: OFF")
+        return
+    if mode == "off":
+        r = run("/Delete", "/TN", TASK_NAME, "/F")
+        lnk = _startup_shortcut()
+        if os.path.exists(lnk):
+            os.remove(lnk)
+        print("Auto-start is OFF. Careter keeps running until you stop it "
+              "(python caret_ai.py --stop) or sign out.")
+        return
+    for with_logon in (True, False):            # some PCs don't let normal users add login triggers
+        with tempfile.NamedTemporaryFile("w", suffix=".xml", delete=False, encoding="utf-16") as f:
+            f.write(_task_xml(with_logon))
+        r = run("/Create", "/TN", TASK_NAME, "/XML", f.name, "/F")
+        os.remove(f.name)
+        if r.returncode == 0:
+            break
+    if r.returncode != 0:
+        print("Could not create the scheduled task:", (r.stderr or r.stdout).strip())
+        return
+    if with_logon and os.path.exists(_startup_shortcut()):
+        os.remove(_startup_shortcut())          # the task starts it at login now
+    run("/Run", "/TN", TASK_NAME)               # start it now if it isn't running
+    print("Auto-start is ON: Careter starts when you sign in and comes back within 5 minutes "
+          "if it stops." + ("" if with_logon else " (Login start uses your Startup folder shortcut.)"))
+
+
+def stop_command():
+    """--stop: close the running Careter (with auto-start on, it comes back within 5 minutes)."""
+    import subprocess
+    ps = ("Get-CimInstance Win32_Process | Where-Object { $_.Name -like 'python*' -and "
+          f"$_.CommandLine -like '*caret_ai.py*' -and $_.ProcessId -ne {os.getpid()} -and "
+          "$_.CommandLine -notlike '*--stop*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force; $_.ProcessId }")
+    r = subprocess.run(["powershell", "-NoProfile", "-Command", ps], capture_output=True, text=True)
+    stopped = [x for x in r.stdout.split() if x.isdigit()]
+    print(f"Stopped Careter ({len(stopped)} process{'es' if len(stopped) != 1 else ''})." if stopped
+          else "Careter wasn't running.")
+
+
 def learned_data_command(args):
     """--export-learned FILE: write what Careter learned (decrypted) as readable JSON.
     --forget-learned: delete everything it learned (words, word pairs, words you told it to keep)."""
@@ -1928,6 +2027,12 @@ def learned_data_command(args):
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] in ("--export-learned", "--forget-learned"):
         learned_data_command(sys.argv[1:])
+        sys.exit(0)
+    if len(sys.argv) > 1 and sys.argv[1] == "--autostart":
+        autostart_command(sys.argv[2] if len(sys.argv) > 2 else "on")
+        sys.exit(0)
+    if len(sys.argv) > 1 and sys.argv[1] == "--stop":
+        stop_command()
         sys.exit(0)
     _lock = single_instance_lock()
     App().run()

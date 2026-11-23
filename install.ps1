@@ -32,6 +32,9 @@ $Lnk.Arguments = "`"$Dir\caret_ai.py`""
 $Lnk.WorkingDirectory = $Dir
 $Lnk.Save()
 
-Start-Process $PyW -ArgumentList "`"$Dir\caret_ai.py`"" -WorkingDirectory $Dir
+# Keep it running: a scheduled task starts it at login and brings it back within 5 minutes if it
+# stops (replaces the shortcut above when Windows allows a login trigger). This also starts it now.
+& "$Dir\.venv\Scripts\python.exe" "$Dir\caret_ai.py" --autostart on
+if ($LASTEXITCODE -ne 0) { Start-Process $PyW -ArgumentList "`"$Dir\caret_ai.py`"" -WorkingDirectory $Dir }
 Write-Host ""
-Write-Host "Careter installed and set to start at login. Press Ctrl+Alt+Space anywhere."
+Write-Host "Careter installed and always running. Press Ctrl+Alt+Space anywhere."
