@@ -70,7 +70,9 @@ PREDICT_COUNT = 5             # suggestions shown, picked with keys 1-5
 PREDICT_IN_TERMINALS = False  # shell commands aren't prose; off by default
 PREDICT_HOTKEY = "double-tap Ctrl (or Ctrl+Alt+P)"  # turns predictions (and auto-correct) on/off
 AUTOCORRECT = os.getenv("CARET_AUTOCORRECT", "1") != "0"   # fix clear typos when you press space
-LEARN = os.getenv("CARET_LEARN", "1") != "0"   # learn your words & word pairs (ngrams/user_model.json)
+BROWSERS = {"chrome.exe", "msedge.exe", "brave.exe", "vivaldi.exe", "opera.exe", "chromium.exe"}
+WEB_PORT = 47822              # the Careter browser extension reports the caret here (127.0.0.1 only)
+LEARN = os.getenv("CARET_LEARN", "1") != "0"   # learn your words & word pairs (ngrams/user_model.dat, encrypted)
 
 IS_MAC = platform.system() == "Darwin"
 IS_WIN = platform.system() == "Windows"
@@ -1109,6 +1111,98 @@ class Session:
             self.app.session = None
 
 
+class WebCaret:
+    """Listens on 127.0.0.1 for the Careter browser extension (chrome-extension/), which reports the
+    text before the caret and where the caret is on the page. Only browser extensions can post here
+    (web pages can't fake an extension's Origin), and only this PC can reach it."""
+
+    def __init__(self, port=WEB_PORT):
+        import http.server
+        self.latest, self.lock = None, threading.Lock()
+        owner = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                origin = self.headers.get("Origin", "")
+                size = int(self.headers.get("Content-Length") or 0)
+                if self.path != "/caret" or not origin.startswith("chrome-extension://") or size > 65536:
+                    self.send_response(403)
+                    self.end_headers()
+                    return
+                try:
+                    data = json.loads(self.rfile.read(size).decode("utf-8"))
+                    if isinstance(data, dict):
+                        data["at"] = time.time()
+                        with owner.lock:
+                            owner.latest = data
+                    self.send_response(204)
+                except ValueError:
+                    self.send_response(400)
+                self.end_headers()
+
+            def log_message(self, *args):          # quiet: never log what was typed
+                pass
+
+        self.server = http.server.ThreadingHTTPServer(("127.0.0.1", port), Handler)
+        self.server.daemon_threads = True
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+    def fresh(self, since, max_age=1.5):
+        """The latest report if it came after `since` (your last keystroke) and is recent."""
+        with self.lock:
+            d = self.latest
+        if d and d["at"] >= since - 0.05 and time.time() - d["at"] <= max_age:
+            return d
+        return None
+
+    def recent_password(self, max_age=5.0):
+        with self.lock:
+            d = self.latest
+        return bool(d and d.get("password") and time.time() - d["at"] <= max_age)
+
+
+def browser_viewport(hwnd):
+    """Screen (left, top) of the web page area in a Chromium browser window: its largest visible
+    'Chrome_RenderWidgetHostHWND' child. None if not found."""
+    import ctypes
+    from ctypes import wintypes as W
+    u = ctypes.WinDLL("user32")
+    found = []
+    PROC = ctypes.WINFUNCTYPE(W.BOOL, W.HWND, W.LPARAM)
+
+    def visit(child, _):
+        name = ctypes.create_unicode_buffer(64)
+        u.GetClassNameW(child, name, 64)
+        if name.value == "Chrome_RenderWidgetHostHWND" and u.IsWindowVisible(child):
+            r = W.RECT()
+            if u.GetWindowRect(child, ctypes.byref(r)):
+                found.append(((r.right - r.left) * (r.bottom - r.top), r.left, r.top))
+        return True
+    u.EnumChildWindows.argtypes = [W.HWND, PROC, W.LPARAM]
+    u.GetClassNameW.argtypes = [W.HWND, W.LPWSTR, ctypes.c_int]
+    u.IsWindowVisible.argtypes = [W.HWND]
+    u.GetWindowRect.argtypes = [W.HWND, ctypes.POINTER(W.RECT)]
+    u.EnumChildWindows(hwnd, PROC(visit), 0)
+    if not found:
+        return None
+    _, left, top = max(found)
+    return left, top
+
+
+def web_point(web, hwnd):
+    """Screen point (x, top, bottom) of the caret from an extension report: page area origin +
+    CSS pixels x devicePixelRatio (which already includes zoom and Windows scaling)."""
+    rect = web.get("rect")
+    if not rect:
+        return None
+    vp = browser_viewport(hwnd)
+    if not vp:
+        return None
+    dpr = float(web.get("dpr") or 1)
+    return (int(vp[0] + rect["left"] * dpr), int(vp[1] + rect["top"] * dpr),
+            int(vp[1] + rect["bottom"] * dpr))
+
+
 class Predictions:
     """Next-word suggestions while you type, from a small local model (predict.py).
 
@@ -1129,6 +1223,12 @@ class Predictions:
         self.buf, self.buf_hwnd, self.buf_proc = "", None, ""
         self.speller, self.last_fix, self.fixing = None, None, False
         self.user_model = None
+        self.last_key_at = 0.0
+        self.web = None
+        try:
+            self.web = WebCaret()
+        except OSError:
+            log(f"predict: browser helper port {WEB_PORT} is busy; browsers fall back to keys")
         self.shown, self.visible = [], False
         self.gen = 0                       # bumps on every keystroke; stale predictions are dropped
         self.timer = None
@@ -1183,7 +1283,8 @@ class Predictions:
             personal = lambda engine: engine
             if LEARN:
                 from predict import PersonalPredictor, UserModel
-                self.user_model = UserModel(os.path.join(folder, "user_model.json"))
+                self.user_model = UserModel(os.path.join(folder, "user_model.dat"),
+                                            legacy=os.path.join(folder, "user_model.json"))
                 personal = lambda engine: PersonalPredictor(engine, self.user_model)
                 self.predictor = personal(ngram)
                 threading.Thread(target=self.autosave, daemon=True).start()
@@ -1231,7 +1332,7 @@ class Predictions:
 
     def learn_last(self):
         """A word was just finished (space/enter/accepted): count it, and the word before it."""
-        if not self.user_model or self.buf_proc in TERMINALS:
+        if not self.user_model or self.buf_proc in TERMINALS or self.in_browser_password():
             return
         m = re.search(r"((?:[^\W\d_]|['’\-])+)\s\Z", self.buf)
         if not m:
@@ -1299,6 +1400,7 @@ class Predictions:
         if not getattr(self, "seen_key", False):
             self.seen_key = True
             log("predict: keyboard hook is receiving keys")
+        self.last_key_at = time.time()
         hwnd = self.user32.GetForegroundWindow()
         if hwnd != self.buf_hwnd:              # another window: what we typed before doesn't apply
             self.buf, self.buf_hwnd, self.last_fix = "", hwnd, None
@@ -1328,7 +1430,7 @@ class Predictions:
     # --- auto-correct (runs inside the keyboard hook: only fast dictionary lookups here)
     def check_fix(self):
         """Space pressed: if the word just typed is a clear typo, return a job that replaces it."""
-        if self.buf_proc in TERMINALS:
+        if self.buf_proc in TERMINALS or self.in_browser_password():
             return None
         m = re.search(r"([^\W\d_]+)\Z", self.buf)
         if not m:
@@ -1345,6 +1447,10 @@ class Predictions:
         if not new or new == word:
             return None
         return lambda: self.apply_fix(word, new)
+
+    def in_browser_password(self):
+        web = getattr(self, "web", None)
+        return bool(web and self.buf_proc in BROWSERS and web.recent_password())
 
     def apply_fix(self, word, new):
         try:
@@ -1423,11 +1529,18 @@ class Predictions:
                 return why(f"skipped, {proc} is a terminal")
             if self.app.session and self.app.session.acting:
                 return
-            uia = run_with_timeout(lambda: read_before_caret(300), 0.4)
-            if uia and uia[2]:
-                return why("skipped, password box")
-            source = "uia" if uia and uia[0].strip() else "keys"
-            text = uia[0] if source == "uia" else self.buf
+            web = self.web.fresh(self.last_key_at) if (self.web and proc in BROWSERS) else None
+            uia = None
+            if web:                            # the browser extension told us exactly
+                if web.get("password"):
+                    return why("skipped, password box (browser)")
+                source, text = "web", web.get("text") or ""
+            else:
+                uia = run_with_timeout(lambda: read_before_caret(300), 0.4)
+                if uia and uia[2]:
+                    return why("skipped, password box")
+                source = "uia" if uia and uia[0].strip() else "keys"
+                text = uia[0] if source == "uia" else self.buf
             if gen != self.gen:
                 return
             if not text.strip():
@@ -1439,8 +1552,9 @@ class Predictions:
                 return
             if not words:
                 return why(f"no suggestions ({source}, {len(text)} chars, ends {'space' if text[-1] == ' ' else 'mid-word' if text[-1].isalnum() else 'punct'}, {ms:.0f}ms)")
-            where = "uia"
-            point = uia[1] if uia else None
+            where, point = "uia", (uia[1] if uia else None)
+            if web:
+                point, where = web_point(web, hwnd), "web"
             if not point:
                 point, where = caret_rect(), "caret"
             if not point:
@@ -1784,6 +1898,32 @@ def single_instance_lock():
     return lock
 
 
+def learned_data_command(args):
+    """--export-learned FILE: write what Careter learned (decrypted) as readable JSON.
+    --forget-learned: delete everything it learned (words, word pairs, words you told it to keep)."""
+    import json
+    from predict import UserModel
+    folder = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ngrams")
+    model = os.path.join(folder, "user_model.dat")
+    if args[0] == "--export-learned":
+        out = args[1] if len(args) > 1 else "careter_learned.json"
+        data = UserModel(model, legacy=os.path.join(folder, "user_model.json")).export()
+        with open(out, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=1)
+        print(f"Wrote {len(data['words'])} words and {sum(map(len, data['pairs'].values()))} "
+              f"word pairs to {os.path.abspath(out)} (plain text: delete it when you're done).")
+    else:
+        gone = [n for n in ("user_model.dat", "user_model.json", "user_words.dat", "user_words.txt")
+                if os.path.exists(os.path.join(folder, n))]
+        for n in gone:
+            os.remove(os.path.join(folder, n))
+        print("Forgot everything Careter learned." if gone else "Nothing learned yet.",
+              "Restart Careter if it's running.")
+
+
 if __name__ == "__main__":
+    if len(sys.argv) > 1 and sys.argv[1] in ("--export-learned", "--forget-learned"):
+        learned_data_command(sys.argv[1:])
+        sys.exit(0)
     _lock = single_instance_lock()
     App().run()

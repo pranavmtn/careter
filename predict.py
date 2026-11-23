@@ -440,7 +440,7 @@ class Speller:
     """Fixes typos using the word-frequency list: famous typos (teh -> the) always, one-letter
     mistakes, two-letter mistakes in words of 7+ letters, and three in words of 9+. Conservative on purpose: lowercase
     words only (no names, ACRONYMS or numbers), and words you undo are remembered in
-    user_words.txt and never corrected again."""
+    user_words.dat and never corrected again."""
     COMMON = 40_000     # words more common than this rank are never "corrected"
     RARE_TO = 3_000     # a rare-but-real word is only swapped for a very common one
     TARGET1 = 30_000      # a one-letter fix only aims at the 30k most common words
@@ -466,11 +466,12 @@ class Speller:
             if len(w) >= self.LONG_MIN_LEN - 3:
                 self.long.setdefault(w[0], []).append((w, self.pairs(w)))
         self.user_model = None                          # set by the app when learning is on
-        self.path = os.path.join(folder, "user_words.txt")
-        self.user = set()
-        if os.path.exists(self.path):
-            with open(self.path, encoding="utf-8") as f:
-                self.user = {line.strip().lower() for line in f if line.strip()}
+        self.path = os.path.join(folder, "user_words.dat")         # encrypted like user_model.dat
+        self.legacy = os.path.join(folder, "user_words.txt")
+        raw, from_legacy = read_private(self.path, self.legacy)
+        self.user = {w.strip().lower() for w in (raw or b"").decode("utf-8").splitlines() if w.strip()}
+        if from_legacy:
+            self._save_words()
 
     def correct(self, word, prev=None):
         if not word.isalpha() or not word.islower() or word in self.user:
@@ -536,30 +537,100 @@ class Speller:
         word = word.lower()
         if word and word not in self.user:
             self.user.add(word)
-            try:
-                with open(self.path, "a", encoding="utf-8") as f:
-                    f.write(word + "\n")
-            except OSError:
-                pass
+            self._save_words()
+
+    def _save_words(self):
+        try:
+            write_private(self.path, "\n".join(sorted(self.user)).encode("utf-8"), self.legacy)
+        except OSError:
+            pass
+
+
+# ---------------------------------------------------------------- private storage (Windows DPAPI)
+# What Careter learns about you is encrypted with your Windows login (DPAPI): no password to manage,
+# readable only by your Windows account on this PC, unreadable if the file is copied elsewhere.
+SECURE_MAGIC = b"CARETER-DPAPI-1\n"
+_ENTROPY = b"careter user data v1"
+
+
+def _dpapi(data, encrypt):
+    import ctypes
+    from ctypes import wintypes as W
+
+    class BLOB(ctypes.Structure):
+        _fields_ = [("cbData", W.DWORD), ("pbData", ctypes.POINTER(ctypes.c_char))]
+
+    def blob(b):
+        buf = ctypes.create_string_buffer(b, len(b))
+        return BLOB(len(b), ctypes.cast(buf, ctypes.POINTER(ctypes.c_char))), buf
+
+    crypt32, kernel32 = ctypes.WinDLL("crypt32", use_last_error=True), ctypes.WinDLL("kernel32")
+    fn = crypt32.CryptProtectData if encrypt else crypt32.CryptUnprotectData
+    fn.argtypes = [ctypes.POINTER(BLOB), ctypes.c_void_p, ctypes.POINTER(BLOB), ctypes.c_void_p,
+                   ctypes.c_void_p, W.DWORD, ctypes.POINTER(BLOB)]
+    fn.restype = W.BOOL
+    kernel32.LocalFree.argtypes = [ctypes.c_void_p]
+    (inp, keep1), (ent, keep2), out = blob(data), blob(_ENTROPY), BLOB()
+    desc = ctypes.c_wchar_p("Careter") if encrypt else None
+    if not fn(ctypes.byref(inp), desc, ctypes.byref(ent), None, None, 0x1, ctypes.byref(out)):  # UI_FORBIDDEN
+        raise OSError(f"DPAPI {'encrypt' if encrypt else 'decrypt'} failed ({ctypes.get_last_error()})")
+    try:
+        return ctypes.string_at(out.pbData, out.cbData)
+    finally:
+        kernel32.LocalFree(ctypes.cast(out.pbData, ctypes.c_void_p))
+
+
+def protect(data):
+    """bytes -> what goes on disk (encrypted on Windows, unchanged elsewhere)."""
+    return SECURE_MAGIC + _dpapi(data, True) if os.name == "nt" else data
+
+
+def unprotect(raw):
+    """What's on disk -> bytes. Old plain files are read as they are."""
+    return _dpapi(raw[len(SECURE_MAGIC):], False) if raw.startswith(SECURE_MAGIC) else raw
+
+
+def read_private(path, legacy=None):
+    """Bytes of a private file, or of its old plain-text version (legacy) if only that exists.
+    Returns (data or None, came_from_legacy)."""
+    if os.path.exists(path):
+        with open(path, "rb") as f:
+            return unprotect(f.read()), False
+    if legacy and os.path.exists(legacy):
+        with open(legacy, "rb") as f:
+            return f.read(), True
+    return None, False
+
+
+def write_private(path, data, legacy=None):
+    tmp = path + ".tmp"
+    with open(tmp, "wb") as f:
+        f.write(protect(data))
+    os.replace(tmp, path)
+    if legacy and os.path.exists(legacy):
+        os.remove(legacy)                               # the old plain-text copy is no longer needed
 
 
 # ---------------------------------------------------------------- learning from your own typing
 class UserModel:
     """Words and word pairs YOU type, counted on your PC (never full sentences, never uploaded).
-    Saved as JSON; delete the file to forget everything."""
+    Stored encrypted with your Windows login (user_model.dat); delete it to forget everything."""
     MAX_PAIRS = 60_000
 
-    def __init__(self, path):
+    def __init__(self, path, legacy=None):
         import json
-        self.path, self.dirty = path, False
+        self.path, self.legacy, self.dirty = path, legacy, False
         self.lock = threading.Lock()
         self.uni, self.bi = {}, {}
-        try:
-            with open(path, encoding="utf-8") as f:
-                data = json.load(f)
+        raw, from_legacy = read_private(path, legacy)
+        if raw:
+            data = json.loads(raw.decode("utf-8"))
             self.uni, self.bi = data.get("words", {}), data.get("pairs", {})
-        except (OSError, ValueError):
-            pass
+            self.dirty = from_legacy                    # re-save encrypted, then drop the plain file
+
+    def export(self):
+        with self.lock:
+            return {"words": dict(self.uni), "pairs": {a: dict(d) for a, d in self.bi.items()}}
 
     def learn(self, prev, word):
         with self.lock:
@@ -597,12 +668,9 @@ class UserModel:
             if pairs > self.MAX_PAIRS:                  # forget one-off pairs first
                 self.bi = {a: {b: c for b, c in d.items() if c > 1} for a, d in self.bi.items()}
                 self.bi = {a: d for a, d in self.bi.items() if d}
-            data = {"words": self.uni, "pairs": self.bi}
+            data = json.dumps({"words": self.uni, "pairs": self.bi}, ensure_ascii=False)
             self.dirty = False
-        tmp = self.path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False)
-        os.replace(tmp, self.path)
+        write_private(self.path, data.encode("utf-8"), self.legacy)
 
 
 class PersonalPredictor:

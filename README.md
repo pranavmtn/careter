@@ -27,8 +27,8 @@ While you type anywhere, Careter suggests the next word, or the rest of the word
 
 - Up to **5 suggestions**, numbered. Press **1–5** to insert one (**Tab** also takes the first). After you accept, it suggests the word after that.
 - Keep typing or press **Esc** and the strip goes away. Number keys and Tab behave normally whenever the strip isn't showing.
-- **Auto-correct:** when you press space after a typo, it's fixed: famous typos ("teh" → "the", "adn" → "and"), one-letter mistakes ("recevie" → "receive"), and two-letter mistakes in words of 7+ letters ("definatly" → "definitely"), and up to three in words of 9+ letters ("aknoldgement" → "acknowledgement"). Fixes keep the first letter and aim only at common words. Press **Backspace** right after to put back what you typed; that word is then never corrected again (saved in `ngrams/user_words.txt`). It only touches lowercase words of 3+ letters that follow another word, so names, ACRONYMS, numbers, the first word in a box (usernames, passwords) and terminals are left alone. `CARET_AUTOCORRECT=0` turns it off.
-- **Learns from you:** it counts the words you type and which word you type after which, and puts your own habits first (up to 3 of the 5 slots). A pair counts after you've typed it twice; a word completion after 3 uses. Words you use 3+ times are never auto-corrected. Stored only on your PC as single words and word pairs (never sentences) in `ngrams/user_model.json`, saved every 30 s. Delete that file to forget everything; `CARET_LEARN=0` turns learning off. Nothing is learned in terminals, from the first word in a box, or while prediction is off.
+- **Auto-correct:** when you press space after a typo, it's fixed: famous typos ("teh" → "the", "adn" → "and"), one-letter mistakes ("recevie" → "receive"), and two-letter mistakes in words of 7+ letters ("definatly" → "definitely"), and up to three in words of 9+ letters ("aknoldgement" → "acknowledgement"). Fixes keep the first letter and aim only at common words. Press **Backspace** right after to put back what you typed; that word is then never corrected again (saved, encrypted, in `ngrams/user_words.dat`). It only touches lowercase words of 3+ letters that follow another word, so names, ACRONYMS, numbers, the first word in a box (usernames, passwords) and terminals are left alone. `CARET_AUTOCORRECT=0` turns it off.
+- **Learns from you:** it counts the words you type and which word you type after which, and puts your own habits first (up to 3 of the 5 slots). A pair counts after you've typed it twice; a word completion after 3 uses. Words you use 3+ times are never auto-corrected. Stored only on your PC as single words and word pairs (never sentences) in `ngrams/user_model.dat`, saved every 30 s and **encrypted with your Windows login** (DPAPI): only your Windows account on this PC can read it, with no password to manage. `CARET_LEARN=0` turns learning off. Nothing is learned in terminals, from the first word in a box, or while prediction is off.
 - **Double-tap Ctrl** (or Ctrl+Alt+P) turns prediction and auto-correct off and on, e.g. when you need to type numbers or Manglish. A label at the mouse shows which.
 
 Two engines, both local and free (neither uses the OpenAI key). What you type stays in memory on your PC and is never logged. It never runs in password boxes, in terminals (`PREDICT_IN_TERMINALS`), or inside Careter's own bubble.
@@ -42,7 +42,20 @@ Two engines, both local and free (neither uses the OpenAI key). What you type st
 | `CARET_PREDICT_ENGINE` | `llm` | `llm` (with word lists as backup) or `ngram` only |
 | `CARET_PREDICT_MODEL` | `HuggingFaceTB/SmolLM2-135M` | For `llm`: any Hugging Face **base** (not chat) causal LM |
 
-In Chrome and other apps that don't report their caret position, the strip appears at the mouse pointer.
+### Your learned data
+
+```powershell
+.\.venv\Scripts\python caret_ai.py --export-learned learned.json   # readable copy (delete it after)
+.\.venv\Scripts\python caret_ai.py --forget-learned                 # erase everything it learned
+```
+
+### Browser helper (Chrome, Edge, Brave)
+
+Browsers don't tell Windows where the caret is, so without help the strip appears at the mouse pointer. The small extension in `chrome-extension/` fixes that: it sends Careter the text just before the caret and the caret's position, so suggestions sit right under your text and use the real text.
+
+Install once: open `chrome://extensions` (or `edge://extensions`), turn on **Developer mode**, click **Load unpacked**, and choose the `careter\chrome-extension` folder.
+
+Privacy: it talks only to Careter on this PC (`127.0.0.1:47822`, which accepts only browser extensions), sends at most 300 characters before the caret and never anything after it, never page addresses, and never password boxes (it only says "password box", so Careter also skips auto-correct and learning there). It can't see inside Google Docs (drawn on a canvas); there the mouse fallback is used.
 
 ## Install (one command)
 
