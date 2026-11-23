@@ -405,7 +405,7 @@ COMMON_TYPOS = {
     "knwo": "know", "konw": "know", "nwo": "now", "ot": "to", "fo": "of", "fro": "for", "ofr": "for",
     "yuo": "you", "yoru": "your", "abotu": "about", "aboutt": "about", "woudl": "would",
     "coudl": "could", "shoudl": "should", "whihc": "which", "wehn": "when", "becaus": "because",
-    "pleae": "please", "plese": "please", "pls": "please", "thnaks": "thanks", "thansk": "thanks",
+    "pleae": "please", "plese": "please", "thnaks": "thanks", "thansk": "thanks",
     "msot": "most", "frist": "first", "thign": "thing", "thigns": "things", "agian": "again",
 }
 
