@@ -21,6 +21,25 @@ An AI that lives at your cursor. Point at any spot on screen (a terminal, an ebo
 
 When the bubble opens it first says what it sees and offers 2–4 one-click next actions; you can also type or speak your own. Settings (`CONTEXT_CHARS`, `SECTION_BREAKS`, `AUTO_SUGGEST`) are at the top of `caret_ai.py`.
 
+## Word prediction (Windows, local, no API key)
+
+While you type anywhere, Careter suggests the next word, or the rest of the word you're typing, in a small strip at the caret:
+
+- **Tab** inserts the first suggestion. **Ctrl+2 / Ctrl+3** (or a click) picks another. After you accept, it suggests the word after that.
+- Keep typing or press **Esc** and the strip goes away. Tab and Ctrl+digit behave normally whenever the strip isn't showing.
+- **Ctrl+Alt+P** turns prediction on and off.
+
+It runs a small open-source model on your CPU (`HuggingFaceTB/SmolLM2-135M`, about 270 MB, downloaded on first start). It does **not** use the OpenAI key. What you type stays in memory on your PC and is never logged. It never runs in password boxes, in terminals (`PREDICT_IN_TERMINALS`), or inside Careter's own bubble.
+
+How it works: an LLM only predicts the next *token*. `predict.py` takes the model's top next tokens and keeps the ones that start a word matching what you've typed. It then extends each one until the word ends.
+
+| Env var | Default | Purpose |
+|---|---|---|
+| `CARET_PREDICT` | `1` | `0` starts with prediction off |
+| `CARET_PREDICT_MODEL` | `HuggingFaceTB/SmolLM2-135M` | Any Hugging Face **base** (not chat) causal LM, e.g. `HuggingFaceTB/SmolLM2-360M` or `Qwen/Qwen2.5-0.5B` for better but slower suggestions |
+
+Prediction works best in English with this model. For Malayalam, point `CARET_PREDICT_MODEL` at a model trained on it.
+
 ## Install (one command)
 
 These clone Careter into your home folder, install dependencies, ask for your OpenAI key (saved to `careter/.env`), and set it to start at login.

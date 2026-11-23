@@ -7,3 +7,6 @@ pillow
 numpy
 sounddevice
 uiautomation; sys_platform == "win32"
+# word prediction (local model, Windows)
+torch; sys_platform == "win32"
+transformers>=4.40; sys_platform == "win32"
