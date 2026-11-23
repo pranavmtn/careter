@@ -27,7 +27,8 @@ While you type anywhere, Careter suggests the next word, or the rest of the word
 
 - Up to **5 suggestions**, numbered. Press **1–5** to insert one (**Tab** also takes the first). After you accept, it suggests the word after that.
 - Keep typing or press **Esc** and the strip goes away. Number keys and Tab behave normally whenever the strip isn't showing.
-- **Double-tap Ctrl** (or Ctrl+Alt+P) turns prediction off and on, e.g. when you need to type numbers. A label at the mouse shows which.
+- **Auto-correct:** when you press space after a clear typo, it's fixed ("recieve " → "receive "). Press **Backspace** right after to put back what you typed; that word is then never corrected again (saved in `ngrams/user_words.txt`). It only touches lowercase words of 3+ letters that follow another word, so names, ACRONYMS, numbers, the first word in a box (usernames, passwords) and terminals are left alone. `CARET_AUTOCORRECT=0` turns it off.
+- **Double-tap Ctrl** (or Ctrl+Alt+P) turns prediction and auto-correct off and on, e.g. when you need to type numbers or Manglish. A label at the mouse shows which.
 
 Two engines, both local and free (neither uses the OpenAI key). What you type stays in memory on your PC and is never logged. It never runs in password boxes, in terminals (`PREDICT_IN_TERMINALS`), or inside Careter's own bubble.
 

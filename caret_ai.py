@@ -68,7 +68,8 @@ PREDICT_MODEL = os.getenv("CARET_PREDICT_MODEL", "HuggingFaceTB/SmolLM2-135M")  
 PREDICT_DELAY = 0.18          # seconds of no typing before suggestions appear
 PREDICT_COUNT = 5             # suggestions shown, picked with keys 1-5
 PREDICT_IN_TERMINALS = False  # shell commands aren't prose; off by default
-PREDICT_HOTKEY = "double-tap Ctrl (or Ctrl+Alt+P)"  # turns predictions on/off
+PREDICT_HOTKEY = "double-tap Ctrl (or Ctrl+Alt+P)"  # turns predictions (and auto-correct) on/off
+AUTOCORRECT = os.getenv("CARET_AUTOCORRECT", "1") != "0"   # fix clear typos when you press space
 
 IS_MAC = platform.system() == "Darwin"
 IS_WIN = platform.system() == "Windows"
@@ -1124,7 +1125,8 @@ class Predictions:
         self.app = app
         self.enabled = PREDICT
         self.predictor = None
-        self.buf, self.buf_hwnd = "", None
+        self.buf, self.buf_hwnd, self.buf_proc = "", None, ""
+        self.speller, self.last_fix, self.fixing = None, None, False
         self.shown, self.visible = [], False
         self.gen = 0                       # bumps on every keystroke; stale predictions are dropped
         self.timer = None
@@ -1176,6 +1178,9 @@ class Predictions:
             folder = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ngrams")
             ngram = NGramPredictor(folder, log=log)
             self.predictor = ngram
+            if AUTOCORRECT:
+                from predict import Speller
+                self.speller = Speller(ngram, folder)
             log(f"predict: word lists ready in {time.time() - t0:.1f}s")
             if PREDICT_ENGINE != "llm":
                 return
@@ -1221,6 +1226,15 @@ class Predictions:
         if not down and vk in self.swallow_up:
             self.swallow_up.discard(vk)
             self.kb.suppress_event()
+        if down and vk in (0x20, 0x08) and self.enabled and self.speller and not self.fixing:
+            ctrl, alt, _, win = self.mods()
+            if not (ctrl or alt or win):
+                job = self.check_fix() if vk == 0x20 else self.check_undo()
+                if job:
+                    self.fixing = True
+                    self.swallow_up.add(vk)
+                    threading.Thread(target=job, daemon=True).start()
+                    self.kb.suppress_event()   # we type the space / undo ourselves
         if down and self.visible and self.shown:
             ctrl, alt, shift, win = self.mods()
             pick = None
@@ -1247,7 +1261,8 @@ class Predictions:
             log("predict: keyboard hook is receiving keys")
         hwnd = self.user32.GetForegroundWindow()
         if hwnd != self.buf_hwnd:              # another window: what we typed before doesn't apply
-            self.buf, self.buf_hwnd = "", hwnd
+            self.buf, self.buf_hwnd, self.last_fix = "", hwnd, None
+            self.buf_proc = foreground_window()[1]
         K = keyboard.Key
         if key in (K.shift, K.shift_r, K.caps_lock, K.ctrl, K.ctrl_l, K.ctrl_r,
                    K.alt, K.alt_l, K.alt_r, K.alt_gr, K.cmd, K.cmd_r):
@@ -1268,6 +1283,63 @@ class Predictions:
         self.buf = self.buf[-self.BUF_MAX:]
         self.schedule()
 
+    # --- auto-correct (runs inside the keyboard hook: only fast dictionary lookups here)
+    def check_fix(self):
+        """Space pressed: if the word just typed is a clear typo, return a job that replaces it."""
+        if self.buf_proc in TERMINALS:
+            return None
+        m = re.search(r"([^\W\d_]+)\Z", self.buf)
+        if not m:
+            return None
+        word, before = m.group(1), self.buf[: m.start()]
+        # Only a word that follows another word in this box: never the first thing typed in a field
+        # (that protects passwords and usernames), and never glued to symbols like "x.teh" or "@teh".
+        if not before.strip() or not before[-1].isspace():
+            return None
+        tail = before.rstrip()
+        pm = re.search(r"([^\W\d_]+)\Z", tail)
+        prev = pm.group(1).lower() if (pm and tail[-1] not in ".!?") else None
+        new = self.speller.correct(word, prev)
+        if not new or new == word:
+            return None
+        return lambda: self.apply_fix(word, new)
+
+    def apply_fix(self, word, new):
+        try:
+            self.hide()
+            pyautogui.press("backspace", presses=len(word), _pause=False)
+            pyautogui.write(new + " ", _pause=False)
+            self.buf = (self.buf[: -len(word)] + new + " ")[-self.BUF_MAX:]
+            self.last_fix = (word, new, self.buf)
+            log(f"predict: auto-corrected a {len(word)}-letter word")     # never the word itself
+        except Exception:
+            log("predict: auto-correct failed:\n" + traceback.format_exc())
+        finally:
+            self.fixing = False
+        self.schedule()
+
+    def check_undo(self):
+        """Backspace right after a correction: put back what you typed and remember it."""
+        if not self.last_fix or self.buf != self.last_fix[2]:
+            self.last_fix = None
+            return None
+        word, new, _ = self.last_fix
+        self.last_fix = None
+        return lambda: self.apply_undo(word, new)
+
+    def apply_undo(self, word, new):
+        try:
+            self.hide()
+            pyautogui.press("backspace", presses=len(new) + 1, _pause=False)
+            pyautogui.write(word, _pause=False)
+            self.buf = (self.buf[: -(len(new) + 1)] + word)[-self.BUF_MAX:]
+            self.speller.remember(word)
+            log("predict: correction undone; that word won't be corrected again")
+        except Exception:
+            log("predict: undo failed:\n" + traceback.format_exc())
+        finally:
+            self.fixing = False
+
     def on_click(self, x, y, button, pressed):
         if not pressed:
             return
@@ -1277,7 +1349,7 @@ class Predictions:
         self.reset()                           # the caret probably moved
 
     def reset(self):
-        self.buf = ""
+        self.buf, self.last_fix = "", None
         self.gen += 1
         if self.timer:
             self.timer.cancel()

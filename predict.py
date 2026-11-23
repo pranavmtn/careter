@@ -374,3 +374,60 @@ class HybridPredictor:
                 return words
         self.last = "ngram"
         return self.ngram.predict(text, n)
+
+
+# ---------------------------------------------------------------- spelling correction
+LETTERS = "abcdefghijklmnopqrstuvwxyz"
+
+
+def edits1(w):
+    """Every string one edit away: delete, swap neighbours, replace, insert (Norvig's corrector)."""
+    splits = [(w[:i], w[i:]) for i in range(len(w) + 1)]
+    deletes = [a + b[1:] for a, b in splits if b]
+    swaps = [a + b[1] + b[0] + b[2:] for a, b in splits if len(b) > 1]
+    replaces = [a + c + b[1:] for a, b in splits if b for c in LETTERS]
+    inserts = [a + c + b for a, b in splits for c in LETTERS]
+    return set(deletes + swaps + replaces + inserts)
+
+
+class Speller:
+    """Fixes clear one-letter typos using the word-frequency list. Conservative on purpose:
+    lowercase words of 3+ letters only (no names, ACRONYMS or numbers), and words you undo are
+    remembered in user_words.txt and never corrected again."""
+    COMMON = 40_000     # words more common than this rank are never "corrected"
+    RARE_TO = 3_000     # a rare-but-real word is only swapped for a very common one
+
+    def __init__(self, ngram, folder):
+        self.ng = ngram
+        self.rank = {w: i for i, w in enumerate(ngram.words)}
+        self.path = os.path.join(folder, "user_words.txt")
+        self.user = set()
+        if os.path.exists(self.path):
+            with open(self.path, encoding="utf-8") as f:
+                self.user = {line.strip().lower() for line in f if line.strip()}
+
+    def correct(self, word, prev=None):
+        if len(word) < 3 or not word.isalpha() or not word.islower():
+            return None
+        if word in self.user:
+            return None
+        r = self.rank.get(word)
+        if r is not None and r < self.COMMON:
+            return None                                 # a normal word
+        cands = [c for c in edits1(word) if c in self.rank]
+        if r is not None:
+            cands = [c for c in cands if self.rank[c] < self.RARE_TO]
+        if not cands:
+            return None
+        follows = set(self.ng.bi.get(prev, [])) if prev else set()
+        return min(cands, key=lambda c: (c not in follows, self.rank[c]))   # fits context, then most common
+
+    def remember(self, word):
+        word = word.lower()
+        if word and word not in self.user:
+            self.user.add(word)
+            try:
+                with open(self.path, "a", encoding="utf-8") as f:
+                    f.write(word + "\n")
+            except OSError:
+                pass
