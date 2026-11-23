@@ -70,6 +70,7 @@ PREDICT_COUNT = 5             # suggestions shown, picked with keys 1-5
 PREDICT_IN_TERMINALS = False  # shell commands aren't prose; off by default
 PREDICT_HOTKEY = "double-tap Ctrl (or Ctrl+Alt+P)"  # turns predictions (and auto-correct) on/off
 AUTOCORRECT = os.getenv("CARET_AUTOCORRECT", "1") != "0"   # fix clear typos when you press space
+LEARN = os.getenv("CARET_LEARN", "1") != "0"   # learn your words & word pairs (ngrams/user_model.json)
 
 IS_MAC = platform.system() == "Darwin"
 IS_WIN = platform.system() == "Windows"
@@ -1127,6 +1128,7 @@ class Predictions:
         self.predictor = None
         self.buf, self.buf_hwnd, self.buf_proc = "", None, ""
         self.speller, self.last_fix, self.fixing = None, None, False
+        self.user_model = None
         self.shown, self.visible = [], False
         self.gen = 0                       # bumps on every keystroke; stale predictions are dropped
         self.timer = None
@@ -1178,9 +1180,18 @@ class Predictions:
             folder = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ngrams")
             ngram = NGramPredictor(folder, log=log)
             self.predictor = ngram
+            personal = lambda engine: engine
+            if LEARN:
+                from predict import PersonalPredictor, UserModel
+                self.user_model = UserModel(os.path.join(folder, "user_model.json"))
+                personal = lambda engine: PersonalPredictor(engine, self.user_model)
+                self.predictor = personal(ngram)
+                threading.Thread(target=self.autosave, daemon=True).start()
+                log(f"predict: learning on, knows {len(self.user_model.uni)} of your words")
             if AUTOCORRECT:
                 from predict import Speller
                 self.speller = Speller(ngram, folder)
+                self.speller.user_model = self.user_model
             log(f"predict: word lists ready in {time.time() - t0:.1f}s")
             if PREDICT_ENGINE != "llm":
                 return
@@ -1197,12 +1208,41 @@ class Predictions:
                 return
             hybrid = HybridPredictor(llm, ngram, PREDICT_LLM_TIMEOUT)
             warm = llm.predict("Hello, how are ", timeout=30)    # warm-up
-            self.predictor = hybrid
+            self.predictor = personal(hybrid)
             log(f"predict: LLM ready in {time.time() - t0:.1f}s, test: {[w for w, _ in warm]}")
         except Exception:
             log("predict: failed to load:\n" + traceback.format_exc())
         finally:
             self.loading = False
+
+    def autosave(self):
+        import atexit
+        atexit.register(self.save_learned)
+        while True:
+            time.sleep(30)
+            self.save_learned()
+
+    def save_learned(self):
+        try:
+            if self.user_model:
+                self.user_model.save()
+        except Exception:
+            log("predict: could not save what it learned:\n" + traceback.format_exc())
+
+    def learn_last(self):
+        """A word was just finished (space/enter/accepted): count it, and the word before it."""
+        if not self.user_model or self.buf_proc in TERMINALS:
+            return
+        m = re.search(r"((?:[^\W\d_]|['’\-])+)\s\Z", self.buf)
+        if not m:
+            return
+        word, before = m.group(1), self.buf[: m.start()]
+        if not before.strip() or not before[-1].isspace():
+            return                             # first word in a box (maybe a username/password)
+        tail = before.rstrip()
+        pm = re.search(r"((?:[^\W\d_]|['’\-])+)\Z", tail)
+        prev = pm.group(1).lower() if (pm and tail[-1] not in ".!?") else None
+        self.user_model.learn(prev, word.lower().replace("’", "'"))
 
     def toggle(self):
         self.enabled = not self.enabled
@@ -1273,8 +1313,10 @@ class Predictions:
             self.buf = self.buf[:-1]
         elif key == K.space and not (ctrl or alt or win):
             self.buf += " "
+            self.learn_last()
         elif key == K.enter and not (ctrl or alt):
             self.buf += "\n"
+            self.learn_last()
         elif char and char.isprintable() and not win and (ctrl == alt):   # ctrl+alt = AltGr chars
             self.buf += char
         else:                                  # arrows, Home, Esc, shortcuts (Ctrl+V…): caret/text unknown
@@ -1311,6 +1353,7 @@ class Predictions:
             pyautogui.write(new + " ", _pause=False)
             self.buf = (self.buf[: -len(word)] + new + " ")[-self.BUF_MAX:]
             self.last_fix = (word, new, self.buf)
+            self.learn_last()
             log(f"predict: auto-corrected a {len(word)}-letter word")     # never the word itself
         except Exception:
             log("predict: auto-correct failed:\n" + traceback.format_exc())
@@ -1429,6 +1472,7 @@ class Predictions:
             log("predict: insert failed:\n" + traceback.format_exc())
             return
         self.buf = (self.buf + insert)[-self.BUF_MAX:]
+        self.learn_last()
         self.schedule()                        # offer the word after it straight away
 
     # --- the strip (UI thread only)

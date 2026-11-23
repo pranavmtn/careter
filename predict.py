@@ -261,6 +261,37 @@ NGRAM_URL = "https://norvig.com/ngrams/"
 SENTENCE_END = ".!?\n"
 
 
+def read_context(text):
+    """(partial word being typed, previous word or None, at sentence start) or None if the caret is
+    somewhere a suggestion makes no sense (empty box, right after punctuation like "end.")."""
+    text = text[-MAX_CHARS:]
+    partial = PARTIAL_RE.search(text).group(0)
+    prefix = text[: len(text) - len(partial)]
+    if not prefix.strip() and not partial:
+        return None
+    if prefix and not (prefix[-1].isspace() or prefix[-1] in "([{\"'“‘/"):
+        return None
+    tail = prefix.rstrip(" \t")
+    start = not tail or tail[-1] in SENTENCE_END
+    m = re.search(rf"((?:{WORD})+)\Z", tail)
+    prev = m.group(1).lower() if (m and not start) else None
+    return partial, prev, start
+
+
+def shape(w, partial, start):
+    """(shown word, text to type) for lowercase word w, keeping the case of what was typed."""
+    rest = w[len(partial):]
+    if w == "i" or w.startswith("i'"):
+        shown = "I" + w[1:]
+    elif partial:
+        shown = partial + (rest.upper() if partial.isupper() and len(partial) > 1 else rest)
+    elif start:
+        shown = w[:1].upper() + w[1:]
+    else:
+        shown = w
+    return shown, shown[len(partial):] + " "
+
+
 class NGramPredictor:
     def __init__(self, folder, max_words=100_000, per_prev=40, log=print):
         import pickle
@@ -316,19 +347,11 @@ class NGramPredictor:
         return words, bi
 
     def predict(self, text, n=3, **_):
-        text = text[-MAX_CHARS:]
-        partial = PARTIAL_RE.search(text).group(0)
-        prefix = text[: len(text) - len(partial)]
-        if not prefix.strip() and not partial:
+        ctx = read_context(text)
+        if not ctx:
             return []
-        if prefix and not (prefix[-1].isspace() or prefix[-1] in "([{\"'“‘/"):
-            return []                                   # glued to punctuation: "end." -> wait
-        tail = prefix.rstrip(" \t")
-        start = not tail or tail[-1] in SENTENCE_END
-        m = re.search(rf"((?:{WORD})+)\Z", tail)
-        prev = m.group(1).lower() if (m and not start) else None
+        partial, prev, start = ctx
         p = partial.lower()
-
         picks = []
         def add(w):
             if len(w) > len(p) and w.startswith(p) and w not in picks:
@@ -343,20 +366,7 @@ class NGramPredictor:
                 add(w)
                 if len(picks) >= n:
                     break
-
-        out = []
-        for w in picks[:n]:
-            rest = w[len(p):]
-            if w == "i" or w.startswith("i'"):
-                shown = "I" + w[1:]
-            elif partial:
-                shown = partial + (rest.upper() if partial.isupper() and len(partial) > 1 else rest)
-            elif start:
-                shown = w[:1].upper() + w[1:]
-            else:
-                shown = w
-            out.append((shown, shown[len(partial):] + " "))
-        return out
+        return [shape(w, partial, start) for w in picks[:n]]
 
 
 class HybridPredictor:
@@ -447,6 +457,7 @@ class Speller:
             if len(w) >= self.EDIT2_MIN_LEN - 2:
                 for k in {w} | {w[:j] + w[j + 1:] for j in range(len(w))}:
                     self.dix.setdefault(k, []).append(i)
+        self.user_model = None                          # set by the app when learning is on
         self.path = os.path.join(folder, "user_words.txt")
         self.user = set()
         if os.path.exists(self.path):
@@ -456,6 +467,8 @@ class Speller:
     def correct(self, word, prev=None):
         if not word.isalpha() or not word.islower() or word in self.user:
             return None
+        if self.user_model and self.user_model.count(word) >= 3:
+            return None                                 # you type this word a lot: it's yours
         if word in COMMON_TYPOS:
             return COMMON_TYPOS[word]
         if len(word) < 3:
@@ -495,3 +508,94 @@ class Speller:
                     f.write(word + "\n")
             except OSError:
                 pass
+
+
+# ---------------------------------------------------------------- learning from your own typing
+class UserModel:
+    """Words and word pairs YOU type, counted on your PC (never full sentences, never uploaded).
+    Saved as JSON; delete the file to forget everything."""
+    MAX_PAIRS = 60_000
+
+    def __init__(self, path):
+        import json
+        self.path, self.dirty = path, False
+        self.lock = threading.Lock()
+        self.uni, self.bi = {}, {}
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+            self.uni, self.bi = data.get("words", {}), data.get("pairs", {})
+        except (OSError, ValueError):
+            pass
+
+    def learn(self, prev, word):
+        with self.lock:
+            self.uni[word] = self.uni.get(word, 0) + 1
+            if prev:
+                d = self.bi.setdefault(prev, {})
+                d[word] = d.get(word, 0) + 1
+            self.dirty = True
+
+    def suggest(self, prev, p, n):
+        """Your own likely words: after `prev` (seen 2+ times), then completions of `p` (used 3+ times)."""
+        with self.lock:
+            out = []
+            after = self.bi.get(prev, {}) if prev else {}
+            for w, c in sorted(after.items(), key=lambda kv: -kv[1]):
+                if c >= 2 and len(w) > len(p) and w.startswith(p) and w not in out:
+                    out.append(w)
+            if p:
+                for w, c in sorted(self.uni.items(), key=lambda kv: -kv[1]):
+                    if len(out) >= n:
+                        break
+                    if c >= 3 and len(w) > len(p) and w.startswith(p) and w not in out:
+                        out.append(w)
+            return out[:n]
+
+    def count(self, word):
+        return self.uni.get(word, 0)
+
+    def save(self):
+        import json
+        with self.lock:
+            if not self.dirty:
+                return
+            pairs = sum(len(v) for v in self.bi.values())
+            if pairs > self.MAX_PAIRS:                  # forget one-off pairs first
+                self.bi = {a: {b: c for b, c in d.items() if c > 1} for a, d in self.bi.items()}
+                self.bi = {a: d for a, d in self.bi.items() if d}
+            data = {"words": self.uni, "pairs": self.bi}
+            self.dirty = False
+        tmp = self.path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False)
+        os.replace(tmp, self.path)
+
+
+class PersonalPredictor:
+    """Puts your own habits first (up to `mine` slots), then the underlying engine's suggestions."""
+
+    def __init__(self, base, user, mine=3):
+        self.base, self.user, self.mine = base, user, mine
+        self.last = "ngram"
+
+    def predict(self, text, n=3, cancelled=None, **_):
+        words = self.base.predict(text, n, cancelled=cancelled)
+        base_last = getattr(self.base, "last", "ngram")
+        ctx = read_context(text)
+        if not ctx:
+            self.last = base_last
+            return words
+        partial, prev, start = ctx
+        out, seen = [], set()
+        for w in self.user.suggest(prev, partial.lower(), min(self.mine, n)):
+            item = shape(w, partial, start)
+            out.append(item)
+            seen.add(item[0].lower())
+        personal = len(out)
+        for item in words:
+            if item[0].lower() not in seen and len(out) < n:
+                out.append(item)
+                seen.add(item[0].lower())
+        self.last = f"you({personal})+{base_last}" if personal else base_last
+        return out
