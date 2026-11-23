@@ -62,7 +62,8 @@ AUTO_SUGGEST = True     # when the bubble opens, analyse the spot and offer next
 
 # Word prediction while you type (Windows). Runs a small local model: no API key, nothing leaves the PC.
 PREDICT = os.getenv("CARET_PREDICT", "1") != "0"
-PREDICT_MODEL = os.getenv("CARET_PREDICT_MODEL", "HuggingFaceTB/SmolLM2-135M")   # a *base* model
+PREDICT_ENGINE = os.getenv("CARET_PREDICT_ENGINE", "ngram")  # "ngram" (instant, word counts) or "llm"
+PREDICT_MODEL = os.getenv("CARET_PREDICT_MODEL", "HuggingFaceTB/SmolLM2-135M")   # llm engine: a *base* model
 PREDICT_DELAY = 0.18          # seconds of no typing before suggestions appear
 PREDICT_COUNT = 3             # suggestions shown
 PREDICT_IN_TERMINALS = False  # shell commands aren't prose; off by default
@@ -1137,13 +1138,19 @@ class Predictions:
             return
         try:
             t0 = time.time()
-            log(f"predict: loading {PREDICT_MODEL} (first run downloads it)…")
-            from predict import PredictorProcess
-            self.predictor = PredictorProcess(PREDICT_MODEL)       # model runs in its own process
+            if PREDICT_ENGINE == "llm":
+                log(f"predict: loading {PREDICT_MODEL} (first run downloads it)…")
+                from predict import PredictorProcess
+                self.predictor = PredictorProcess(PREDICT_MODEL)   # model runs in its own process
+            else:
+                log("predict: loading word lists…")
+                from predict import NGramPredictor
+                folder = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ngrams")
+                self.predictor = NGramPredictor(folder, log=log)
             warm = self.predictor.predict("Hello, how are ")      # warm-up
             log(f"predict: ready in {time.time() - t0:.1f}s, test: {[w for w, _ in warm]}")
         except Exception as e:
-            if "No module named" in str(e):
+            if "No module named" in str(e) and PREDICT_ENGINE == "llm":
                 log("predict: off. It needs torch + transformers: pip install -r requirements.txt")
             else:
                 log("predict: model failed to load:\n" + traceback.format_exc())

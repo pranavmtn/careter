@@ -251,3 +251,109 @@ class PredictorProcess:
                 if got == rid:
                     return words                        # older, late answers are skipped
             return []
+
+
+# ---------------------------------------------------------------- light engine: word counts (n-grams)
+# No neural network: counts of common English words and word pairs (Peter Norvig's lists from the
+# Google Web 1T data). Downloaded once (~10 MB), then answers in about a millisecond.
+
+NGRAM_URL = "https://norvig.com/ngrams/"
+SENTENCE_END = ".!?\n"
+
+
+class NGramPredictor:
+    def __init__(self, folder, max_words=100_000, per_prev=40, log=print):
+        import pickle
+        os.makedirs(folder, exist_ok=True)
+        cache = os.path.join(folder, "ngrams.pkl")
+        if os.path.exists(cache):
+            with open(cache, "rb") as f:
+                self.words, self.bi = pickle.load(f)
+        else:
+            files = {}
+            for name in ("count_1w.txt", "count_2w.txt"):
+                path = files[name] = os.path.join(folder, name)
+                if not os.path.exists(path):
+                    import urllib.request
+                    log(f"predict: downloading {name}…")
+                    urllib.request.urlretrieve(NGRAM_URL + name, path + ".part")
+                    os.replace(path + ".part", path)
+            self.words, self.bi = self._build(files, max_words, per_prev)
+            with open(cache, "wb") as f:
+                pickle.dump((self.words, self.bi), f, protocol=pickle.HIGHEST_PROTOCOL)
+        self.lock = threading.Lock()
+        self.by1, self.by2 = {}, {}                     # first letter(s) -> words, most common first
+        for w in self.words:
+            self.by1.setdefault(w[0], []).append(w)
+            if len(w) > 1:
+                self.by2.setdefault(w[:2], []).append(w)
+
+    @staticmethod
+    def _build(files, max_words, per_prev):
+        def ok(w):
+            return w.isalpha() and (len(w) > 1 or w in ("a", "i"))
+        words = []
+        with open(files["count_1w.txt"], encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                w = line.split("\t", 1)[0].lower()
+                if ok(w):
+                    words.append(w)
+                    if len(words) >= max_words:
+                        break
+        known = set(words)
+        bi = {}
+        with open(files["count_2w.txt"], encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                try:
+                    pair, count = line.rstrip("\n").split("\t")
+                    a, b = pair.lower().split(" ")
+                    count = int(count)
+                except ValueError:
+                    continue
+                if a in known and b in known:
+                    bi.setdefault(a, []).append((count, b))
+        bi = {a: [b for _, b in sorted(v, reverse=True)[:per_prev]] for a, v in bi.items()}
+        return words, bi
+
+    def predict(self, text, n=3, **_):
+        text = text[-MAX_CHARS:]
+        partial = PARTIAL_RE.search(text).group(0)
+        prefix = text[: len(text) - len(partial)]
+        if not prefix.strip() and not partial:
+            return []
+        if prefix and not (prefix[-1].isspace() or prefix[-1] in "([{\"'“‘/"):
+            return []                                   # glued to punctuation: "end." -> wait
+        tail = prefix.rstrip(" \t")
+        start = not tail or tail[-1] in SENTENCE_END
+        m = re.search(rf"((?:{WORD})+)\Z", tail)
+        prev = m.group(1).lower() if (m and not start) else None
+        p = partial.lower()
+
+        picks = []
+        def add(w):
+            if len(w) > len(p) and w.startswith(p) and w not in picks:
+                picks.append(w)
+        for w in self.bi.get(prev, []) if prev else []:
+            add(w)
+            if len(picks) >= n:
+                break
+        if len(picks) < n:
+            pool = self.by2.get(p[:2], []) if len(p) >= 2 else self.by1.get(p, []) if p else self.words
+            for w in pool:
+                add(w)
+                if len(picks) >= n:
+                    break
+
+        out = []
+        for w in picks[:n]:
+            rest = w[len(p):]
+            if w == "i" or w.startswith("i'"):
+                shown = "I" + w[1:]
+            elif partial:
+                shown = partial + (rest.upper() if partial.isupper() and len(partial) > 1 else rest)
+            elif start:
+                shown = w[:1].upper() + w[1:]
+            else:
+                shown = w
+            out.append((shown, shown[len(partial):] + " "))
+        return out

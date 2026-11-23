@@ -29,16 +29,18 @@ While you type anywhere, Careter suggests the next word, or the rest of the word
 - Keep typing or press **Esc** and the strip goes away. Tab and Ctrl+digit behave normally whenever the strip isn't showing.
 - **Ctrl+Alt+P** turns prediction on and off.
 
-It runs a small open-source model on your CPU (`HuggingFaceTB/SmolLM2-135M`, about 270 MB, downloaded on first start). It does **not** use the OpenAI key. What you type stays in memory on your PC and is never logged. It never runs in password boxes, in terminals (`PREDICT_IN_TERMINALS`), or inside Careter's own bubble.
+Two engines, both local and free (neither uses the OpenAI key). What you type stays in memory on your PC and is never logged. It never runs in password boxes, in terminals (`PREDICT_IN_TERMINALS`), or inside Careter's own bubble.
 
-How it works: an LLM only predicts the next *token*. `predict.py` takes the model's top next tokens and keeps the ones that start a word matching what you've typed. It then extends each one until the word ends.
+- **`ngram` (default): instant.** Counts of the most common English words and word pairs (Peter Norvig's lists from Google's Web 1T data, about 10 MB, downloaded once into `careter/ngrams/`). It completes the word you're typing and predicts the next word from the one before.
+- **`llm`: smarter, heavier.** A small open-source model (`HuggingFaceTB/SmolLM2-135M`) in its own low-priority process. Install `pip install -r requirements-llm.txt` and set `CARET_PREDICT_ENGINE=llm`. Turning an LLM's next-*token* guesses into words is done in `predict.py`.
 
 | Env var | Default | Purpose |
 |---|---|---|
 | `CARET_PREDICT` | `1` | `0` starts with prediction off |
-| `CARET_PREDICT_MODEL` | `HuggingFaceTB/SmolLM2-135M` | Any Hugging Face **base** (not chat) causal LM, e.g. `HuggingFaceTB/SmolLM2-360M` or `Qwen/Qwen2.5-0.5B` for better but slower suggestions |
+| `CARET_PREDICT_ENGINE` | `ngram` | `ngram` or `llm` |
+| `CARET_PREDICT_MODEL` | `HuggingFaceTB/SmolLM2-135M` | For `llm`: any Hugging Face **base** (not chat) causal LM |
 
-Prediction works best in English with this model. For Malayalam, point `CARET_PREDICT_MODEL` at a model trained on it.
+In Chrome and other apps that don't report their caret position, the strip appears at the mouse pointer.
 
 ## Install (one command)
 

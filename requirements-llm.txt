@@ -1,0 +1,3 @@
+# Optional: the "llm" word-prediction engine (CARET_PREDICT_ENGINE=llm)
+torch
+transformers>=4.40
