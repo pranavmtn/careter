@@ -1125,12 +1125,37 @@ class Predictions:
         self.swallow_up = set()            # keys whose key-up we also hide from the app
         self.strip = None
         self.strip_rect = (0, 0, 0, 0)
+        self.w = self.typed_user32()
         app.q.put(self.build_strip)
         threading.Thread(target=self.load, daemon=True).start()
         self.kb = keyboard.Listener(on_press=self.on_press, win32_event_filter=self.filter)
         self.kb.start()
         self.ms = mouse.Listener(on_click=self.on_click)
         self.ms.start()
+
+    @staticmethod
+    def typed_user32():
+        """Our own user32 with exact argument types. Window handles are 64-bit pointers: passed as
+        plain ints they can get cut short and the call silently fails (the strip never shows)."""
+        import ctypes
+        from ctypes import wintypes as W
+        u = ctypes.WinDLL("user32")
+        sig = {
+            "GetAncestor": ([W.HWND, W.UINT], W.HWND),
+            "GetWindowLongW": ([W.HWND, ctypes.c_int], ctypes.c_long),
+            "SetWindowLongW": ([W.HWND, ctypes.c_int, ctypes.c_long], ctypes.c_long),
+            "ShowWindow": ([W.HWND, ctypes.c_int], W.BOOL),
+            "EnableWindow": ([W.HWND, W.BOOL], W.BOOL),
+            "IsWindowVisible": ([W.HWND], W.BOOL),
+            "GetForegroundWindow": ([], W.HWND),
+            "SetForegroundWindow": ([W.HWND], W.BOOL),
+            "SetWindowPos": ([W.HWND, W.HWND, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+                              W.UINT], W.BOOL),
+        }
+        for name, (args, res) in sig.items():
+            fn = getattr(u, name)
+            fn.argtypes, fn.restype = args, res
+        return u
 
     # --- model
     def load(self):
@@ -1320,6 +1345,7 @@ class Predictions:
             log("predict: strip window failed:\n" + traceback.format_exc())
 
     def _build_strip(self):
+        w = self.w
         win = self.strip = tk.Toplevel(self.app.root)
         win.overrideredirect(True)
         win.attributes("-topmost", True)
@@ -1328,16 +1354,16 @@ class Predictions:
         self.strip_box.pack(padx=1, pady=1)
         win.geometry("+-2000+-2000")
         win.update_idletasks()
-        self.strip_hwnd = self.user32.GetAncestor(win.winfo_id(), 2)        # GA_ROOT
+        self.strip_hwnd = w.GetAncestor(win.winfo_id(), 2)          # GA_ROOT
         GWL_EXSTYLE, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW = -20, 0x08000000, 0x80
-        style = self.user32.GetWindowLongW(self.strip_hwnd, GWL_EXSTYLE)
-        self.user32.SetWindowLongW(self.strip_hwnd, GWL_EXSTYLE, style | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW)
+        style = w.GetWindowLongW(self.strip_hwnd, GWL_EXSTYLE)
+        w.SetWindowLongW(self.strip_hwnd, GWL_EXSTYLE, style | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW)
         try:
             win.attributes("-disabled", True)       # a disabled window can't take keyboard focus
         except tk.TclError:
             pass
-        self.user32.EnableWindow(self.strip_hwnd, False)
-        self.user32.ShowWindow(self.strip_hwnd, 0)
+        w.ShowWindow(self.strip_hwnd, 0)            # SW_HIDE
+        self.strip_checked = False
 
     def fill(self, items):
         for child in self.strip_box.winfo_children():
@@ -1357,23 +1383,29 @@ class Predictions:
     def place_strip(self, point):
         x, top, bottom = point
         self.strip.update_idletasks()
-        w, h = self.strip.winfo_reqwidth(), self.strip.winfo_reqheight()
+        w_, h = self.strip.winfo_reqwidth(), self.strip.winfo_reqheight()
         left, mtop, right, mbottom = monitor_bounds(x, top)
         y = bottom + 4 if bottom + 4 + h < mbottom else top - h - 4
-        x = max(left, min(x, right - w))
-        self.strip_rect = (x, y, x + w, y + h)
-        SWP_NOSIZE, SWP_NOACTIVATE, SWP_SHOWWINDOW = 0x1, 0x10, 0x40
-        before = self.user32.GetForegroundWindow()
+        x = max(left, min(x, right - w_))
+        self.strip_rect = (x, y, x + w_, y + h)
+        w = self.w
+        before = w.GetForegroundWindow()
         self.strip.geometry(f"+{int(x)}+{int(y)}")
-        self.user32.SetWindowPos(self.strip_hwnd, -1, int(x), int(y), 0, 0,     # -1 = HWND_TOPMOST
-                                 SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW)
+        self.strip.update_idletasks()
+        w.ShowWindow(self.strip_hwnd, 4)                             # SW_SHOWNOACTIVATE
+        SWP_NOSIZE, SWP_NOMOVE, SWP_NOACTIVATE = 0x1, 0x2, 0x10
+        w.SetWindowPos(self.strip_hwnd, -1, 0, 0, 0, 0, SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE)  # topmost
         self.keep_focus(before)
+        if not self.strip_checked:                  # once per run: did it really appear?
+            self.strip_checked = True
+            log(f"predict: strip visible={bool(w.IsWindowVisible(self.strip_hwnd))} at {int(x)},{int(y)} "
+                f"size {w_}x{h}")
 
     def keep_focus(self, hwnd):
         """If showing the strip stole focus, hand it straight back so typing keeps working."""
-        if hwnd and hwnd != self.strip_hwnd and self.user32.GetForegroundWindow() == self.strip_hwnd:
+        if hwnd and hwnd != self.strip_hwnd and self.w.GetForegroundWindow() == self.strip_hwnd:
             log("predict: strip took focus, giving it back")
-            self.user32.SetForegroundWindow(hwnd)
+            self.w.SetForegroundWindow(hwnd)
 
     def show(self, words, point, gen):
         if gen != self.gen or not self.strip:
@@ -1405,7 +1437,7 @@ class Predictions:
         was = self.visible
         self.visible, self.shown = False, []
         if was and self.strip:
-            self.app.q.put(lambda: self.user32.ShowWindow(self.strip_hwnd, 0))
+            self.app.q.put(lambda: self.w.ShowWindow(self.strip_hwnd, 0))
 
 
 class App:
