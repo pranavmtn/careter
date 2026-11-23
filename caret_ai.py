@@ -1140,8 +1140,8 @@ class Predictions:
             log(f"predict: loading {PREDICT_MODEL} (first run downloads it)…")
             from predict import LocalLM, Predictor
             self.predictor = Predictor(LocalLM(PREDICT_MODEL))
-            self.predictor.predict("Hello, how are ")             # warm-up
-            log(f"predict: ready in {time.time() - t0:.1f}s")
+            warm = self.predictor.predict("Hello, how are ")      # warm-up
+            log(f"predict: ready in {time.time() - t0:.1f}s, test: {[w for w, _ in warm]}")
         except ImportError:
             log("predict: off. It needs torch + transformers: pip install -r requirements.txt")
         except Exception:
@@ -1186,6 +1186,9 @@ class Predictions:
     def on_press(self, key):
         if not self.enabled:
             return
+        if not getattr(self, "seen_key", False):
+            self.seen_key = True
+            log("predict: keyboard hook is receiving keys")
         hwnd = self.user32.GetForegroundWindow()
         if hwnd != self.buf_hwnd:              # another window: what we typed before doesn't apply
             self.buf, self.buf_hwnd = "", hwnd
@@ -1235,33 +1238,44 @@ class Predictions:
 
     # --- predict
     def run(self, gen):
+        """Never logs what you typed: only why a suggestion was or wasn't shown."""
+        why = lambda msg: DEBUG and log("predict: " + msg)
         try:
-            if gen != self.gen or not self.predictor or not self.enabled:
+            if gen != self.gen or not self.enabled:
                 return
+            if not self.predictor:
+                return why("model not loaded yet")
             hwnd, proc = foreground_window()
             if self.is_ours(hwnd):
                 return                         # typing in Careter's own bubble
             if proc in TERMINALS and not PREDICT_IN_TERMINALS:
-                return
+                return why(f"skipped, {proc} is a terminal")
             if self.app.session and self.app.session.acting:
                 return
             uia = run_with_timeout(lambda: read_before_caret(300), 0.4)
             if uia and uia[2]:
-                return                         # password box: never predict
-            text = uia[0] if uia and uia[0].strip() else self.buf
-            if gen != self.gen or not text.strip():
+                return why("skipped, password box")
+            source = "uia" if uia and uia[0].strip() else "keys"
+            text = uia[0] if source == "uia" else self.buf
+            if gen != self.gen:
                 return
+            if not text.strip():
+                return why(f"no text before caret in {proc} (uia={'yes' if uia else 'no'})")
             t0 = time.time()
             words = self.predictor.predict(text, PREDICT_COUNT)
             ms = (time.time() - t0) * 1000
-            if ms > 250:
-                log(f"predict: slow, {ms:.0f}ms (try a smaller model or fewer PREDICT_COUNT)")
-            if gen != self.gen or not words:
+            if gen != self.gen:
                 return
-            point = (uia[1] if uia else None) or caret_rect()
+            if not words:
+                return why(f"no suggestions ({source}, {len(text)} chars, ends {'space' if text[-1] == ' ' else 'mid-word' if text[-1].isalnum() else 'punct'}, {ms:.0f}ms)")
+            where = "uia"
+            point = uia[1] if uia else None
+            if not point:
+                point, where = caret_rect(), "caret"
             if not point:
                 mx, my = pyautogui.position()
-                point = (mx, my, my + 16)
+                point, where = (mx, my, my + 16), "mouse"
+            why(f"{len(words)} words in {ms:.0f}ms from {source} in {proc}, strip at {where} {point[0]},{point[2]}")
             self.app.q.put(lambda: self.show(words, point, gen))
         except Exception:
             log("predict failed:\n" + traceback.format_exc())
@@ -1290,6 +1304,14 @@ class Predictions:
 
     # --- the strip (UI thread only)
     def build_strip(self):
+        try:
+            self._build_strip()
+            log("predict: strip window ready")
+        except Exception:
+            self.strip = None
+            log("predict: strip window failed:\n" + traceback.format_exc())
+
+    def _build_strip(self):
         win = self.strip = tk.Toplevel(self.app.root)
         win.overrideredirect(True)
         win.attributes("-topmost", True)
@@ -1335,6 +1357,12 @@ class Predictions:
     def show(self, words, point, gen):
         if gen != self.gen or not self.strip:
             return
+        try:
+            self._show(words, point)
+        except Exception:
+            log("predict: strip failed:\n" + traceback.format_exc())
+
+    def _show(self, words, point):
         hints = ["Tab", "Ctrl+2", "Ctrl+3"]
         items = [(w, hints[i] if i < len(hints) else "",
                   lambda c=(w, ins): threading.Thread(target=self.accept, args=(c,), daemon=True).start())
