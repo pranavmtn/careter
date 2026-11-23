@@ -1140,6 +1140,10 @@ class WebCaret:
                     self.send_response(400)
                 self.end_headers()
 
+            def do_GET(self):                      # "is Careter running?" for the browser extension
+                self.send_response(204 if self.path == "/ping" else 404)
+                self.end_headers()
+
             def log_message(self, *args):          # quiet: never log what was typed
                 pass
 

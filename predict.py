@@ -264,7 +264,7 @@ SENTENCE_END = ".!?\n"
 def read_context(text):
     """(partial word being typed, previous word or None, at sentence start) or None if the caret is
     somewhere a suggestion makes no sense (empty box, right after punctuation like "end.")."""
-    text = text[-MAX_CHARS:]
+    text = text[-MAX_CHARS:].replace("\u00a0", " ")     # rich-text boxes type a trailing space as nbsp
     partial = PARTIAL_RE.search(text).group(0)
     prefix = text[: len(text) - len(partial)]
     if not prefix.strip() and not partial:

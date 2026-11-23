@@ -49,13 +49,29 @@ Two engines, both local and free (neither uses the OpenAI key). What you type st
 .\.venv\Scripts\python caret_ai.py --forget-learned                 # erase everything it learned
 ```
 
-### Browser helper (Chrome, Edge, Brave)
+### Browser helper for the desktop app (Chrome, Edge, Brave)
 
 Browsers don't tell Windows where the caret is, so without help the strip appears at the mouse pointer. The small extension in `chrome-extension/` fixes that: it sends Careter the text just before the caret and the caret's position, so suggestions sit right under your text and use the real text.
 
 Install once: open `chrome://extensions` (or `edge://extensions`), turn on **Developer mode**, click **Load unpacked**, and choose the `careter\chrome-extension` folder.
 
 Privacy: it talks only to Careter on this PC (`127.0.0.1:47822`, which accepts only browser extensions), sends at most 300 characters before the caret and never anything after it, never page addresses, and never password boxes (it only says "password box", so Careter also skips auto-correct and learning there). It can't see inside Google Docs (drawn on a canvas); there the mouse fallback is used.
+
+## Careter for Chrome (standalone extension)
+
+`careter-chrome/` does word prediction inside the browser on its own, with no desktop app. It works on any computer with Chrome or Edge (Windows, Mac, Chromebook, Linux):
+
+- 5 suggestions in a rounded strip under the caret on any website; **1–5** or **Tab** picks, or click.
+- Auto-correct on space (same rules as the desktop: famous typos, 1–3 letter mistakes by word length). **Backspace** right after undoes it, and that word is never corrected again.
+- Learns your words and word pairs. **Double-tap Ctrl**, or click the toolbar icon, turns it off and on.
+- Ignores password, email, phone, number and login- or card-looking fields.
+- **Works alongside the desktop app:** when Careter is running on the PC, this extension stays quiet and the desktop app (with the helper below) handles everything, so you never see two strips.
+
+Install: `chrome://extensions` → **Developer mode** → **Load unpacked** → choose `careter\careter-chrome`. On first use it downloads the word lists once (about 10 MB, from norvig.com) and keeps a compact 1–2 MB version.
+
+Privacy: everything runs in the browser. Your learned words stay in this browser profile (`chrome.storage.local`, not encrypted the way the desktop app's are). Nothing is sent anywhere, apart from the one-time word-list download and a check whether the desktop app is running on `127.0.0.1`.
+
+For the Chrome Web Store you'd also add icons, put a prebuilt `model.json` in the folder (the extension uses it instead of downloading), and write a privacy policy.
 
 ## Install (one command)
 
