@@ -118,6 +118,8 @@ irm https://raw.githubusercontent.com/pranavmtn/careter/main/install.ps1 | iex
 curl -fsSL https://raw.githubusercontent.com/pranavmtn/careter/main/install.sh | bash
 ```
 
+No API key? Press **Enter** when the installer asks for one. Word suggestions, grey text, auto-correct and learning work without it; only the Ctrl+Alt+Space assistant needs a key, which you can add later in **Settings → AI assistant** (OpenAI, Claude or any OpenAI-compatible service).
+
 ## Manual setup
 
 ```bash

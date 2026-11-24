@@ -18,8 +18,11 @@ python -m venv .venv
 
 $EnvFile = Join-Path $Dir ".env"
 if (-not ((Test-Path $EnvFile) -and (Select-String -Path $EnvFile -Pattern "OPENAI_API_KEY" -Quiet))) {
-    $Key = Read-Host "Paste your OpenAI API key"
-    Add-Content -Path $EnvFile -Value "OPENAI_API_KEY=$Key"
+    Write-Host "Word suggestions, grey text and auto-correct work without any key."
+    Write-Host "The Ctrl+Alt+Space AI assistant needs one (you can add it later: Ctrl+Alt+S > Settings > AI assistant)."
+    $Key = Read-Host "Paste your OpenAI API key, or just press Enter to skip"
+    if ($Key.Trim()) { Add-Content -Path $EnvFile -Value "OPENAI_API_KEY=$($Key.Trim())" }
+    else { Write-Host "Skipped. Careter will work without the assistant until you add a key." }
 }
 
 # Start at login, without a console window

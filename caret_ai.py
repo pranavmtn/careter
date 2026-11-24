@@ -109,7 +109,12 @@ IS_WIN = platform.system() == "Windows"
 TERMINALS = {"windowsterminal.exe", "wt.exe", "powershell.exe", "pwsh.exe", "cmd.exe",
              "conhost.exe", "mintty.exe", "openconsole.exe", "alacritty.exe", "wezterm-gui.exe"}
 pyautogui.FAILSAFE = True   # move mouse to a screen corner to abort typing
-client = OpenAI()           # reads OPENAI_API_KEY
+def has_ai_key():
+    return bool(os.environ.get("OPENAI_API_KEY", "").strip())
+
+
+# The AI assistant (Ctrl+Alt+Space) needs a key; everything for typing works without one.
+client = OpenAI() if has_ai_key() else None
 
 SUGGEST_SYSTEM = """You help a user who just called an assistant at their text caret.
 You get the text around the caret ("▮" marks the caret, [[ ]] marks a selection; this is only the
@@ -797,7 +802,9 @@ class Session:
         if IS_WIN:
             win.after(10, lambda: round_window(self.my_hwnd(), S_LINE))
         win.after(30, self.grab_focus)
-        if AUTO_SUGGEST:
+        if not has_ai_key() or client is None:
+            self.no_key()
+        elif AUTO_SUGGEST:
             self.set_status("Reading…")
             threading.Thread(target=self.suggest, daemon=True).start()
         if IS_WIN:
@@ -997,6 +1004,9 @@ class Session:
     # --- input
     def toggle_mic(self):
         if self.recorder.stream is None:
+            if not has_ai_key() or client is None:
+                self.no_key()                        # speech-to-text also uses the AI key
+                return
             self.recorder.start()
             self.mic.configure(text="■", fg=RED)
             self.set_status("Listening… click ■ to stop")
@@ -1017,9 +1027,25 @@ class Session:
                     self.set_status("")
             threading.Thread(target=work, daemon=True).start()
 
+    def no_key(self):
+        """No AI key yet: say so in the card, with a way to add one (typing help works without it)."""
+        self.set_status("The assistant needs an AI key. Word suggestions and auto-correct work without one.")
+        def add_button():
+            if not self.alive:
+                return
+            row = tk.Frame(self.box, bg=S_BG)
+            row.pack(fill="x", pady=(6, 0))
+            self.button(row, "Add a key in Settings", lambda: (self.close(), self.app.q.put(
+                lambda: (self.app.open_settings(), self.app.settings_win.show_tab("Settings")))), S_DARK).pack(side="left")
+            self.place()
+        self.ui(add_button)
+
     def submit(self):
         goal = "" if self.has_placeholder else self.entry.get().strip()
         if not goal or self.busy:
+            return
+        if not has_ai_key() or client is None:
+            self.no_key()
             return
         self.entry.delete(0, "end")
         self.busy = True
@@ -2099,7 +2125,7 @@ HELP_INSTALL = r"""# Install on Windows
 1. Open PowerShell: press the Windows key, type PowerShell, press Enter.
 2. Paste this line and press Enter:
 $ irm https://raw.githubusercontent.com/pranavmtn/careter/main/install.ps1 | iex
-3. When it asks, paste your OpenAI API key (only the Ctrl+Alt+Space assistant uses it; you can change it later in Settings → AI assistant).
+3. When it asks for an API key, paste one, or just press Enter to skip. Word suggestions, grey text and auto-correct work without a key; only the Ctrl+Alt+Space assistant needs one (add or change it any time in Settings → AI assistant: OpenAI, Claude and others work).
 That's it: Careter starts now and every time you sign in. Press Ctrl+Alt+S to see this window.
 
 ## Update to the newest version
@@ -2345,7 +2371,8 @@ class SettingsWindow:
         self.cards["autocorrect"].configure(text=on(AUTOCORRECT and bool(pred and pred.speller)))
         n = len(pred.user_model.uni) if (pred and pred.user_model) else 0
         self.cards["learned"].configure(text=f"{n:,}" if LEARN else "Off")
-        self.cards["model"].configure(text=MODEL if len(MODEL) <= 16 else MODEL[:15] + "…")
+        self.cards["model"].configure(text=(MODEL if len(MODEL) <= 16 else MODEL[:15] + "…") if has_ai_key()
+                                      else "No key yet")
 
     # --- tab: settings (scrollable: it's a long list)
     def build_settings(self, outer):
