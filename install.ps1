@@ -22,7 +22,11 @@ if (-not ((Test-Path $EnvFile) -and (Select-String -Path $EnvFile -Pattern "OPEN
     Write-Host "The Ctrl+Alt+Space AI assistant needs one (you can add it later: Ctrl+Alt+S > Settings > AI assistant)."
     $Key = Read-Host "Paste your OpenAI API key, or just press Enter to skip"
     if ($Key.Trim()) { Add-Content -Path $EnvFile -Value "OPENAI_API_KEY=$($Key.Trim())" }
-    else { Write-Host "Skipped. Careter will work without the assistant until you add a key." }
+    else {
+        # remember the choice so re-running the installer doesn't ask again (Careter ignores # lines)
+        Add-Content -Path $EnvFile -Value "# OPENAI_API_KEY skipped at install: add one in Settings > AI assistant"
+        Write-Host "Skipped. Careter works without the assistant until you add a key."
+    }
 }
 
 # Start at login, without a console window

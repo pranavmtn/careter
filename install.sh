@@ -23,7 +23,8 @@ python3 -m venv .venv
 if ! grep -q "OPENAI_API_KEY" .env 2>/dev/null; then
   echo "The AI assistant needs an API key (you can add it later in .env as OPENAI_API_KEY=...)."
   read -r -p "Paste your OpenAI API key, or press Enter to skip: " KEY </dev/tty
-  if [ -n "$KEY" ]; then echo "OPENAI_API_KEY=$KEY" >> .env; else echo "Skipped."; fi
+  if [ -n "$KEY" ]; then echo "OPENAI_API_KEY=$KEY" >> .env
+  else echo "# OPENAI_API_KEY skipped at install: add OPENAI_API_KEY=... here later" >> .env; echo "Skipped."; fi
   chmod 600 .env
 fi
 
