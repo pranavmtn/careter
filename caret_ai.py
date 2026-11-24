@@ -74,11 +74,13 @@ BROWSERS = {"chrome.exe", "msedge.exe", "brave.exe", "vivaldi.exe", "opera.exe",
 WEB_PORT = 47822              # the Careter browser extension reports the caret here (127.0.0.1 only)
 LEARN = os.getenv("CARET_LEARN", "1") != "0"   # learn your words & word pairs (ngrams/user_model.dat, encrypted)
 GHOST = True                  # grey completion right after the cursor
+USER_NAME = ""                # your name (Settings): the greeting, and the assistant signs drafts with it
 
 # Settings window (Ctrl+Alt+S) choices are saved here and win over the defaults above.
 SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "settings.json")
 SETTINGS = {"predict": "PREDICT", "ghost": "GHOST", "count": "PREDICT_COUNT", "autocorrect": "AUTOCORRECT",
-            "learn": "LEARN", "engine": "PREDICT_ENGINE", "terminals": "PREDICT_IN_TERMINALS"}
+            "learn": "LEARN", "engine": "PREDICT_ENGINE", "terminals": "PREDICT_IN_TERMINALS",
+            "name": "USER_NAME"}
 
 
 def load_settings():
@@ -718,7 +720,8 @@ class Session:
     def __init__(self, app, anchor, below_y, bounds, shot, hwnd=None, proc="", selection="", ctx=None):
         self.app, self.anchor, self.below_y, self.bounds, self.shot = app, anchor, below_y, bounds, shot
         self.hwnd, self.proc, self.selection, self.ctx = hwnd, proc, selection, ctx
-        self.msgs = [{"role": "system", "content": SYSTEM}]
+        self.msgs = [{"role": "system", "content": SYSTEM + (f"\nThe user's name is {USER_NAME}; use it to "
+                      "sign emails or messages you draft for them." if USER_NAME else "")}]
         self.busy = False
         self.alive = True
         self.last_answer = ""
@@ -2024,6 +2027,12 @@ class Predictions:
             self.app.q.put(_hide)
 
 
+PRIVACY_NOTE = ("Your data stays on this PC. Suggestions, auto-correct and everything Careter learns run "
+                "here and are never sent anywhere (what it learns is encrypted with your Windows login). "
+                "Only the Ctrl+Alt+Space assistant goes online: when you use it, the text around your cursor "
+                "goes to the AI service you chose in Settings, and nowhere else.")
+
+
 HELP_HOME = """## Why Careter
 • Most apps on a PC have no word suggestions or spelling fixes. Careter adds them everywhere you type, like a phone keyboard does.
 • It's free, works offline, learns how you write, and never sends what you type anywhere. What it learns stays encrypted on this PC.
@@ -2219,8 +2228,9 @@ class SettingsWindow:
 
     # --- tab: home
     def build_home(self, page):
-        tk.Label(page, text="Welcome to Careter", bg=S_BG, fg=S_FG, font=(S_FONT[0], S_FONT[1] + 5, "bold"),
-                 anchor="w").pack(fill="x")
+        self.welcome = tk.Label(page, text="", bg=S_BG, fg=S_FG, font=(S_FONT[0], S_FONT[1] + 5, "bold"),
+                                anchor="w")
+        self.welcome.pack(fill="x")
         tk.Label(page, text="Word suggestions, grey-text autocomplete and auto-correct in every app, plus an AI "
                  "assistant at your cursor. Everything for typing runs on this PC.", bg=S_BG, fg=S_MUTED,
                  font=S_FONT, anchor="w", justify="left", wraplength=660).pack(fill="x", pady=(2, 12))
@@ -2243,12 +2253,19 @@ class SettingsWindow:
         self.button(row, "Settings", lambda: self.show_tab("Settings")).pack(side="left", padx=8)
         self.button(row, "Install & update", lambda: self.show_tab("Install & update")).pack(side="left")
         tk.Label(row, text="Ctrl+Alt+S opens this window", bg=S_BG, fg=S_MUTED, font=S_SMALL).pack(side="right")
+        privacy = tk.Frame(page, bg=S_SOFT, highlightthickness=1, highlightbackground=S_LINE, padx=14, pady=10)
+        privacy.pack(fill="x", pady=(10, 0))
+        tk.Label(privacy, text="🔒  PRIVATE BY DESIGN", bg=S_SOFT, fg=S_MUTED,
+                 font=(S_FONT[0], S_FONT[1] - 2, "bold"), anchor="w").pack(fill="x")
+        tk.Label(privacy, text=PRIVACY_NOTE, bg=S_SOFT, fg=S_FG, font=S_FONT, anchor="w", justify="left",
+                 wraplength=640).pack(fill="x", pady=(4, 0))
         tk.Frame(page, bg=S_LINE, height=1).pack(fill="x", pady=(10, 0))
         story = tk.Frame(page, bg=S_BG)
         story.pack(fill="both", expand=True)
         self.build_guide(story, HELP_HOME)
 
     def refresh_home(self):
+        self.welcome.configure(text=f"Welcome, {USER_NAME}" if USER_NAME else "Welcome to Careter")
         pred = self.app.predictions
         on = lambda b: "On" if b else "Off"
         self.cards["predict"].configure(text=on(pred.enabled if pred else PREDICT))
@@ -2287,6 +2304,21 @@ class SettingsWindow:
                            anchor="w").pack(side="left")
             if note:
                 tk.Label(row, text=note, bg=S_BG, fg=S_MUTED, font=S_SMALL).pack(side="left", padx=6)
+
+        header("You")
+        row = tk.Frame(page, bg=S_BG)
+        row.pack(fill="x", pady=2)
+        tk.Label(row, text="Your name", bg=S_BG, fg=S_FG, font=S_FONT, width=14, anchor="w").pack(side="left")
+        self.name_entry = tk.Entry(row, bg=S_SOFT, fg=S_FG, insertbackground=S_FG, relief="flat", font=S_FONT,
+                                   width=30, highlightthickness=1, highlightbackground=S_LINE, highlightcolor=S_DARK)
+        self.name_entry.insert(0, USER_NAME)
+        self.name_entry.pack(side="left", ipady=3)
+        self.name_entry.bind("<Return>", lambda e: self.save_name())
+        self.button(row, "Save", self.save_name, primary=True).pack(side="left", padx=8)
+        tk.Label(page, text="Used to greet you, and the assistant signs drafts with it. Stays on this PC.",
+                 bg=S_BG, fg=S_MUTED, font=S_SMALL, anchor="w").pack(fill="x")
+        tk.Label(page, text="🔒  " + PRIVACY_NOTE, bg=S_BG, fg=S_MUTED, font=S_SMALL, anchor="w",
+                 justify="left", wraplength=640).pack(fill="x", pady=(6, 0))
 
         header("Typing")
         switch("predict", "Word suggestions while I type", pred.enabled if pred else PREDICT,
@@ -2363,6 +2395,12 @@ class SettingsWindow:
         switch("autostart", "Start with Windows and keep running", self.autostart_on() if IS_WIN else False)
         tk.Label(page, text="New here? See the How to use tab.", bg=S_BG, fg=S_MUTED,
                  font=S_SMALL, anchor="w").pack(fill="x", pady=(14, 4))
+
+    def save_name(self):
+        global USER_NAME
+        USER_NAME = " ".join(self.name_entry.get().split())[:40]
+        save_settings()
+        self.say(f"Saved. Hi {USER_NAME}!" if USER_NAME else "Name cleared.")
 
     def save_mine(self):
         pred = self.app.predictions

@@ -75,6 +75,10 @@ Privacy: everything runs in the browser. Your learned words stay in this browser
 
 For the Chrome Web Store you'd also add icons, put a prebuilt `model.json` in the folder (the extension uses it instead of downloading), and write a privacy policy.
 
+## Privacy
+
+Your data stays on your PC. Suggestions, auto-correct and everything Careter learns run locally and are never sent anywhere; what it learns is encrypted with your Windows login. The only thing that goes online is the **Ctrl+Alt+Space assistant**: when you use it, the text around your cursor is sent to the AI service you chose in Settings (OpenAI, Claude, or another), and nowhere else. On first start Careter downloads public word lists (and the small AI model, if enabled); nothing about you is uploaded.
+
 ## Settings
 
 Press **Ctrl+Alt+S** (or open **Careter Settings** from the Start menu, or run `python caret_ai.py --settings`). The window (a light, modern theme) has five tabs:
