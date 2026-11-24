@@ -694,6 +694,24 @@ STRIP_NUM_FONT = ("Segoe UI", 9) if IS_WIN else ("Helvetica", 11)
 STRIP_RADIUS = 14
 
 
+def round_window(hwnd, border_hex=None):
+    """Windows 11: smooth rounded corners (and a thin border colour) for one of our windows."""
+    import ctypes
+    from ctypes import wintypes as W
+    try:
+        dwm = ctypes.WinDLL("dwmapi")
+        dwm.DwmSetWindowAttribute.argtypes = [W.HWND, W.DWORD, ctypes.c_void_p, W.DWORD]
+        pref = ctypes.c_int(2)                                     # DWMWCP_ROUND
+        ok = dwm.DwmSetWindowAttribute(hwnd, 33, ctypes.byref(pref), 4) == 0
+        if ok and border_hex:
+            r, g, b = (int(border_hex[i:i + 2], 16) for i in (1, 3, 5))
+            color = W.DWORD(r | g << 8 | b << 16)
+            dwm.DwmSetWindowAttribute(hwnd, 34, ctypes.byref(color), 4)
+        return ok
+    except Exception:
+        return False
+
+
 class Session:
     """A small tooltip bubble at the caret/selection. Keeps history so you can ask follow-ups."""
 
@@ -714,38 +732,31 @@ class Session:
         self.title = window_title(hwnd)
 
         win = self.win = tk.Toplevel(app.root)
-        win.overrideredirect(True)                 # no title bar: looks like a tooltip
+        win.overrideredirect(True)                 # no title bar: a card at the cursor
         win.attributes("-topmost", True)
-        win.configure(bg=ACCENT)                   # 1px accent border
+        win.configure(bg=S_LINE)                   # thin grey edge (rounded on Windows 11)
         win.bind("<Escape>", lambda e: self.escape())
-        box = self.box = tk.Frame(win, bg=BG, padx=8, pady=6)
+        box = self.box = tk.Frame(win, bg=S_BG, padx=12, pady=10)
         box.pack(padx=1, pady=1)
 
         # selection chip
         if selection:
             preview = " ".join(selection.split())
             preview = preview[:60] + ("…" if len(preview) > 60 else "")
-            tk.Label(box, text=f"✎ “{preview}”", bg=BG, fg=MUTED, font=FONT, anchor="w",
-                     justify="left", wraplength=WRAP).pack(fill="x", pady=(0, 4))
-
-        # what was read around the caret
-        if ctx and not selection:
-            seen = (ctx[0] + "▮" + ctx[2]).replace("\n", "⏎")
-            tk.Label(box, text=f"📄 caret: “{seen}”", bg=BG, fg=MUTED, font=FONT,
-                     anchor="w").pack(fill="x", pady=(0, 4))
-        elif not ctx and not selection:
-            tk.Label(box, text="⚠ couldn't read text at the caret (see careter.log)", bg=BG, fg=RED,
-                     font=FONT, anchor="w").pack(fill="x", pady=(0, 4))
+            tk.Label(box, text=f"“{preview}”", bg=S_BG, fg=S_MUTED, font=S_SMALL, anchor="w",
+                     justify="left", wraplength=WRAP).pack(fill="x", pady=(0, 6))
+        if not ctx and not selection:
+            log("couldn't read text at the caret")   # shown in Settings → Log, not in the card
 
         # input row
-        row = tk.Frame(box, bg=BG)
+        row = tk.Frame(box, bg=S_BG)
         row.pack(fill="x")
-        handle = tk.Label(row, text="✦", bg=BG, fg=ACCENT, font=FONT_B, cursor="fleur")
+        handle = tk.Label(row, text="✦", bg=S_BG, fg=S_DARK, font=S_BOLD, cursor="fleur")
         handle.pack(side="left", padx=(0, 6))
         handle.bind("<ButtonPress-1>", self.drag_start)
         handle.bind("<B1-Motion>", self.drag_move)
-        self.entry = tk.Entry(row, bg=FIELD, fg=FG, insertbackground=FG, relief="flat",
-                              font=FONT, width=34, highlightthickness=0)
+        self.entry = tk.Entry(row, bg=S_FIELD, fg=S_FG, insertbackground=S_FG, relief="flat",
+                              font=S_FONT, width=34, highlightthickness=0)
         self.entry.pack(side="left", fill="x", expand=True, ipady=4)
         self.entry.bind("<Return>", lambda e: self.submit())
         self.placeholder = "Ask about the selection…" if selection else "What should I do here?"
@@ -753,46 +764,29 @@ class Session:
         self.entry.bind("<FocusIn>", lambda e: self.clear_placeholder())
         self.entry.bind("<Key>", lambda e: self.clear_placeholder())
         self.mic = self.icon(row, "🎤", self.toggle_mic)
-        self.icon(row, "🐞", self.toggle_debug)
         self.icon(row, "✕", self.close)
 
         # body (hidden until there is something to show)
-        self.status = tk.Label(box, bg=BG, fg=MUTED, font=FONT, anchor="w")
-        self.answer = tk.Label(box, bg=BG, fg=FG, font=FONT, anchor="w", justify="left", wraplength=WRAP)
-        self.steps = tk.Label(box, bg=BG, fg=MUTED, font=("Consolas", 9) if IS_WIN else ("Menlo", 11),
+        self.status = tk.Label(box, bg=S_BG, fg=S_MUTED, font=S_FONT, anchor="w")
+        self.answer = tk.Label(box, bg=S_BG, fg=S_FG, font=S_FONT, anchor="w", justify="left", wraplength=WRAP)
+        self.steps = tk.Label(box, bg=S_BG, fg=S_MUTED, font=("Consolas", 9) if IS_WIN else ("Menlo", 11),
                               anchor="w", justify="left", wraplength=WRAP)
-        self.confirm = tk.Frame(box, bg=BG)
-        self.confirm_label = tk.Label(self.confirm, bg=BG, fg=MUTED, font=FONT)
+        self.confirm = tk.Frame(box, bg=S_BG)
+        self.confirm_label = tk.Label(self.confirm, bg=S_BG, fg=S_MUTED, font=S_FONT)
         self.confirm_label.pack(side="left")
-        self.button(self.confirm, "Stop", lambda: self.decide(False), FIELD).pack(side="right")
-        self.button(self.confirm, "Run ⏎", lambda: self.decide(True), ACCENT).pack(side="right", padx=4)
-        self.summary = tk.Label(box, bg=BG, fg=MUTED, font=FONT, anchor="w", justify="left", wraplength=WRAP)
-        self.chips = tk.Frame(box, bg=BG)
-        self.tools = tk.Frame(box, bg=BG)
-        self.button(self.tools, "Copy", self.copy_answer, FIELD).pack(side="left")
-        self.button(self.tools, "Insert", self.insert_answer, FIELD).pack(side="left", padx=4)
+        self.button(self.confirm, "Stop", lambda: self.decide(False), S_FIELD).pack(side="right")
+        self.button(self.confirm, "Run ⏎", lambda: self.decide(True), S_DARK).pack(side="right", padx=4)
+        self.summary = tk.Label(box, bg=S_BG, fg=S_MUTED, font=S_FONT, anchor="w", justify="left", wraplength=WRAP)
+        self.chips = tk.Frame(box, bg=S_BG)
+        self.tools = tk.Frame(box, bg=S_BG)
+        self.button(self.tools, "Copy", self.copy_answer, S_FIELD).pack(side="left")
+        self.button(self.tools, "Insert", self.insert_answer, S_FIELD).pack(side="left", padx=4)
 
-        # debug log panel (packed last so it sits at the bottom)
-        self.debug = tk.Frame(box, bg=BG)
-        self.debug_text = tk.Text(self.debug, height=10, width=60, bg="#11101a", fg="#c4f0c5",
-                                  insertbackground=FG, relief="flat", wrap="word",
-                                  font=("Consolas", 8) if IS_WIN else ("Menlo", 10))
-        self.debug_text.pack(fill="both", expand=True)
-        dbar = tk.Frame(self.debug, bg=BG)
-        dbar.pack(fill="x", pady=(2, 0))
-        self.button(dbar, "Copy log", self.copy_log, FIELD).pack(side="left")
-        self.button(dbar, "Clear", lambda: self.debug_text.delete("1.0", "end"), FIELD).pack(side="left", padx=4)
-        for line in LOG_LINES[app.log_start:]:      # lines from this hotkey press
-            self.debug_text.insert("end", line + "\n")
-        self.debug_text.see("end")
-        self.on_log = lambda line: self.ui(lambda: (self.debug_text.insert("end", line + "\n"),
-                                                    self.debug_text.see("end")))
-        LOG_LISTENERS.append(self.on_log)
-        self.debug_open = False
-        if DEBUG:
-            self.toggle_debug()
-
+        self.on_log = None                         # the log lives in Settings → Log now
+        self.spinning = False
         self.place()
+        if IS_WIN:
+            win.after(10, lambda: round_window(self.my_hwnd(), S_LINE))
         win.after(30, self.grab_focus)
         if AUTO_SUGGEST:
             self.set_status("Reading…")
@@ -835,26 +829,27 @@ class Session:
 
     # --- widgets
     def icon(self, parent, text, cmd):
-        lbl = tk.Label(parent, text=text, bg=BG, fg=MUTED, font=FONT, cursor="hand2", padx=4)
+        lbl = tk.Label(parent, text=text, bg=S_BG, fg=S_MUTED, font=S_FONT, cursor="hand2", padx=4)
         lbl.pack(side="left")
         lbl.bind("<Button-1>", lambda e: cmd())
         return lbl
 
     def button(self, parent, text, cmd, bg):
-        b = tk.Label(parent, text=text, bg=bg, fg=FG, font=FONT, padx=10, pady=2, cursor="hand2")
+        b = tk.Label(parent, text=text, bg=bg, fg="#ffffff" if bg == S_DARK else S_FG, font=S_FONT,
+                     padx=10, pady=3, cursor="hand2")
         b.bind("<Button-1>", lambda e: cmd())
         return b
 
     def set_placeholder(self):
         self.entry.delete(0, "end")
         self.entry.insert(0, self.placeholder)
-        self.entry.configure(fg=MUTED)
+        self.entry.configure(fg=S_MUTED)
         self.has_placeholder = True
 
     def clear_placeholder(self):
         if self.has_placeholder:
             self.entry.delete(0, "end")
-            self.entry.configure(fg=FG)
+            self.entry.configure(fg=S_FG)
             self.has_placeholder = False
 
     def grab_focus(self):
@@ -907,8 +902,14 @@ class Session:
             widget.pack_forget()
         self.place()
 
-    def set_status(self, text, color=MUTED):
-        self.ui(lambda: self.show_part(self.status, text, fg=color))
+    def set_status(self, text, color=None):
+        def _s():
+            self.status_text = text or ""
+            self.show_part(self.status, text, fg=color or S_MUTED)
+            if self.status_text.endswith("…") and not self.spinning:
+                self.spinning = True
+                self.spin()
+        self.ui(_s)
 
     def set_answer(self, text):
         self.last_answer = text
@@ -921,20 +922,18 @@ class Session:
         self.ui(_a)
 
     def set_steps(self, text, risky=False):
-        self.ui(lambda: self.show_part(self.steps, text, fg=RED if risky else MUTED))
+        self.ui(lambda: self.show_part(self.steps, text, fg=RED if risky else S_MUTED))
 
-    # --- debug panel
-    def toggle_debug(self):
-        self.debug_open = not self.debug_open
-        if self.debug_open:
-            self.debug.pack(side="bottom", fill="both", expand=True, pady=(8, 0))
-        else:
-            self.debug.pack_forget()
-        self.place()
+    # --- loading indicator: any status ending in "…" spins until it changes
+    SPIN = "◐◓◑◒"
 
-    def copy_log(self):
-        pyperclip.copy(self.debug_text.get("1.0", "end"))
-        self.set_status("Log copied ✓")
+    def spin(self, i=0):
+        text = getattr(self, "status_text", "")
+        if not self.alive or not text.endswith("…"):
+            self.spinning = False
+            return
+        self.status.configure(text=f"{self.SPIN[i % 4]}  {text}")
+        self.win.after(120, lambda: self.spin(i + 1))
 
     # --- analyse the spot and offer next actions
     def suggest(self):
@@ -969,7 +968,7 @@ class Session:
         for child in self.chips.winfo_children():
             child.destroy()
         for text in suggestions[:4]:
-            chip = self.button(self.chips, text, lambda t=text: self.ask(t), FIELD)
+            chip = self.button(self.chips, text, lambda t=text: self.ask(t), S_FIELD)
             chip.pack(side="left", padx=(0, 4), pady=2)
         if suggestions:
             self.chips.pack(anchor="w", pady=(6, 0))
@@ -993,7 +992,7 @@ class Session:
             self.mic.configure(text="■", fg=RED)
             self.set_status("Listening… click ■ to stop")
         else:
-            self.mic.configure(text="…", fg=MUTED)
+            self.mic.configure(text="…", fg=S_MUTED)
 
             def work():
                 try:
@@ -1043,7 +1042,7 @@ class Session:
 
         def show():
             self.confirm_label.configure(text="⚠ Risky. Run?" if risky else "Run these?",
-                                         fg=RED if risky else MUTED)
+                                         fg=RED if risky else S_MUTED)
             self.confirm.pack(fill="x", pady=(6, 0))
             self.place()
             self.win.bind("<Return>", lambda e: self.decide(True))
@@ -1183,7 +1182,7 @@ class Session:
         if not self.alive:
             return
         self.alive = False
-        if self.on_log in LOG_LISTENERS:
+        if self.on_log and self.on_log in LOG_LISTENERS:
             LOG_LISTENERS.remove(self.on_log)
         if self.recorder.stream is not None:
             self.recorder.stream.stop()
@@ -2000,24 +1999,10 @@ class Predictions:
             self.app.q.put(_hide)
 
 
-HELP_HOME = """## What Careter solves
-• Typing on a PC is slow and full of small mistakes, and most apps offer no word suggestions or spelling fixes at all. Careter adds both to every app: Notepad, Word, browsers, chat apps, anywhere you type.
-• Phones have had this for years. On Windows the choices are basic (Windows' own suggestions), paid, or closed (other tools keep what they learn about you in encrypted files you can't look into).
-• Careter is free, works offline, learns how you write, never sends what you type anywhere, and keeps what it learns encrypted on your PC, where you can export or delete it.
-• For anything bigger than a word, the AI assistant is one key away (Ctrl+Alt+Space).
-
-## What was hard to build
-• Finding the cursor in every app. Most modern apps don't tell Windows where you're typing. Careter combines three sources (the classic Windows caret, Windows' accessibility interface, and a small browser extension for websites) and falls back to the mouse when none works.
-• Drawing inside other apps. Windows doesn't allow it, so the grey text is a see-through, click-through window placed exactly at the cursor and tinted to match the app's background. Even making it appear took a fix: on 64-bit Windows the window calls failed silently until window handles were passed with exact types.
-• Speed without freezing your keyboard. The first AI version needed up to 28 seconds per suggestion and made typing lag, because the AI and the keyboard watcher shared one process. Now the AI runs in its own low-priority process, word lists answer first in about 0.1 s, and the AI only replaces them when it finds something better.
-• Borrowing keys without breaking apps. Tab, the arrows and the numbers belong to Careter only while the list is showing, and Careter ignores the keys it types itself.
-• Auto-correct you can trust. Fixing "aknoldgement" (three mistakes) fast enough to run on every space needed a pre-built index, and it must never touch names, passwords, Manglish or your own words, always one Backspace from undo.
-• Privacy. Nothing you type is logged, what it learns is encrypted with your Windows login, personal names are never suggested, and password boxes are skipped.
-
-## Ideas for next
-• A phone keyboard (Android first) with the same engine, and optional sync of what it learned.
-• Better Malayalam and Manglish suggestions.
-• Publishing the Chrome extension.
+HELP_HOME = """## Why Careter
+• Most apps on a PC have no word suggestions or spelling fixes. Careter adds them everywhere you type, like a phone keyboard does.
+• It's free, works offline, learns how you write, and never sends what you type anywhere. What it learns stays encrypted on this PC.
+• For anything bigger than a word, press Ctrl+Alt+Space for the AI assistant at your cursor.
 """
 
 HELP_USE = """# Getting started
