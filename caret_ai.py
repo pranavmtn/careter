@@ -54,10 +54,11 @@ HOTKEY = "<ctrl>+<alt>+<space>"
 MAX_STEPS = 12          # max look -> act cycles per request
 FOCUS_CLICK = True      # click the chosen spot before typing, to give it focus back
 SAMPLE_RATE = 16000
-CONTEXT_CHARS = 10      # characters read before and after the caret
+CONTEXT_WORDS = 100     # words the assistant reads before and after the caret (widened to whole sentences)
+CONTEXT_CHARS = 1200    # how far to look for them
 USE_SCREENSHOTS = False # text-only for now: the AI reads only the text at the caret
 DEBUG = True            # show the live log inside the bubble (toggle with 🐞)
-SECTION_BREAKS = True   # stop reading at a blank line (treat it as the end of the section)
+SECTION_BREAKS = True   # stop at a blank line (end of a section), once at least 40 words are read
 AUTO_SUGGEST = True     # when the bubble opens, analyse the spot and offer next actions
 
 # Word prediction while you type (Windows). Runs a small local model: no API key, nothing leaves the PC.
@@ -74,6 +75,7 @@ BROWSERS = {"chrome.exe", "msedge.exe", "brave.exe", "vivaldi.exe", "opera.exe",
 WEB_PORT = 47822              # the Careter browser extension reports the caret here (127.0.0.1 only)
 LEARN = os.getenv("CARET_LEARN", "1") != "0"   # learn your words & word pairs (ngrams/user_model.dat, encrypted)
 GHOST = True                  # grey completion right after the cursor
+ENTER_PICKS = True            # Enter inserts the highlighted suggestion (like Tab) while the list shows
 USER_NAME = ""                # your name (Settings): the greeting, and the assistant signs drafts with it
 WELCOMED = False              # the shortcuts card was shown once (first start)
 
@@ -81,7 +83,7 @@ WELCOMED = False              # the shortcuts card was shown once (first start)
 SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "settings.json")
 SETTINGS = {"predict": "PREDICT", "ghost": "GHOST", "count": "PREDICT_COUNT", "autocorrect": "AUTOCORRECT",
             "learn": "LEARN", "engine": "PREDICT_ENGINE", "terminals": "PREDICT_IN_TERMINALS",
-            "name": "USER_NAME", "welcomed": "WELCOMED"}
+            "name": "USER_NAME", "welcomed": "WELCOMED", "enter": "ENTER_PICKS"}
 
 
 def load_settings():
@@ -451,13 +453,34 @@ class UiaReader:
         return box[0]
 
 
+def around_words(text, words, side):
+    """About `words` words of `text` next to the caret, widened to whole sentences (not strict)."""
+    spans = list(re.finditer(r"\S+", text))
+    if len(spans) <= words:
+        return text
+    if side == "before":
+        cut = spans[-words].start()
+        start = max((m.end() for m in re.finditer(r"[.!?\n]", text[max(0, cut - 300):cut])), default=None)
+        return text[max(0, cut - 300) + start:] if start is not None else text[cut:]
+    cut = spans[words - 1].end()
+    end = re.search(r"[.!?\n]", text[cut:cut + 300])
+    return text[:cut + end.end()] if end else text[:cut]
+
+
 def trim_context(before, selected, after, chars=CONTEXT_CHARS):
-    """Keep N characters each side of the caret, only within the current section."""
+    """About CONTEXT_WORDS words each side of the caret, in whole sentences. A blank line (a new
+    section) stops the reading only once at least 40 words are in hand."""
     before, after = before.replace("\r\n", "\n"), after.replace("\r\n", "\n")
     if SECTION_BREAKS:
-        before = re.split(r"\n[ \t]*\n", before)[-1]
-        after = re.split(r"\n[ \t]*\n", after)[0]
-    before, after = before[-chars:], after[:chars]
+        parts, kept = re.split(r"(\n[ \t]*\n)", before), ""
+        while parts and len(kept.split()) < 40:
+            kept = parts.pop() + kept
+        before = kept
+        parts, kept = re.split(r"(\n[ \t]*\n)", after), ""
+        while parts and len(kept.split()) < 40:
+            kept = kept + parts.pop(0)
+        after = kept
+    before, after = around_words(before[-chars:], CONTEXT_WORDS, "before"), around_words(after[:chars], CONTEXT_WORDS, "after")
     if not (before.strip() or selected.strip() or after.strip()):
         return None
     return before, selected, after
@@ -476,15 +499,16 @@ def read_context_by_keys(proc, chars=CONTEXT_CHARS):
         old = ""
 
     def copy_side(extend_key, collapse_key):
+        # one keypress selects to the start / end (Ctrl+Shift+Home / End); a plain arrow then puts
+        # the caret back where it was
         sentinel = f"__careter_{time.time()}__"
         pyperclip.copy(sentinel)
-        for _ in range(chars):
-            send_hotkey("shift", extend_key)
+        send_hotkey(mod, "shift", extend_key)
         time.sleep(0.05)
         send_hotkey(mod, "c")
         time.sleep(0.15)
         text = pyperclip.paste()
-        log(f"  shift+{extend_key} x{chars} copied: {'nothing' if text == sentinel else repr(text)}")
+        log(f"  {mod}+shift+{extend_key} copied: {'nothing' if text == sentinel else f'{len(text)} chars'}")
         if text != sentinel and text:
             send_hotkey(collapse_key)        # collapse the selection back onto the caret
             time.sleep(0.03)
@@ -492,8 +516,8 @@ def read_context_by_keys(proc, chars=CONTEXT_CHARS):
         return ""                             # at the start/end: nothing selected, caret didn't move
 
     try:
-        before = copy_side("left", "right")
-        after = copy_side("right", "left")
+        before = copy_side("up" if IS_MAC else "home", "right")      # Mac: Cmd+Shift+Up = to the start
+        after = copy_side("down" if IS_MAC else "end", "left")
     finally:
         pyperclip.copy(old)
     return trim_context(before, "", after)
@@ -1517,7 +1541,7 @@ class Predictions:
                 step = -1 if vk == 0x26 else 1
                 self.app.q.put(lambda: self.move(step))
                 self.kb.suppress_event()
-            if vk in (0x09, 0x0D) and plain:          # Tab / Enter: the highlighted one (= the grey text)
+            if (vk == 0x09 or (vk == 0x0D and ENTER_PICKS)) and plain:   # Tab / Enter: the highlighted one
                 pick = min(self.sel, len(self.shown) - 1)
             elif plain:
                 n = len(self.shown)
@@ -1828,10 +1852,7 @@ class Predictions:
         GWL_EXSTYLE, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW = -20, 0x08000000, 0x80
         style = w.GetWindowLongW(self.strip_hwnd, GWL_EXSTYLE)
         w.SetWindowLongW(self.strip_hwnd, GWL_EXSTYLE, style | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW)
-        try:
-            win.attributes("-disabled", True)       # a disabled window can't take keyboard focus
-        except tk.TclError:
-            pass
+        # WS_EX_NOACTIVATE above keeps focus in your app even when you click or drag the list
         w.ShowWindow(self.strip_hwnd, 0)            # SW_HIDE
         self.strip_checked = False
         self.round_native = self.round_corners()
@@ -1958,6 +1979,14 @@ class Predictions:
         for child in self.strip_box.winfo_children():
             child.destroy()
         self.rows = []
+        if any(cmd for _, _, cmd in items):          # a grip to drag the list out of the way
+            grip = tk.Label(self.strip_box, text="• • •", bg=STRIP_BG, fg=STRIP_NUM, font=(STRIP_FONT[0], 7),
+                            cursor="fleur", pady=0)
+            grip.pack(side="top", fill="x")
+            grip.bind("<ButtonPress-1>", self.drag_start)
+            grip.bind("<B1-Motion>", self.drag_move)
+            grip.bind("<ButtonRelease-1>", self.drag_end)
+            grip.bind("<Double-Button-1>", self.drag_reset)
         for i, (label, hint, cmd) in enumerate(items):
             row = tk.Frame(self.strip_box, bg=STRIP_BG, cursor="hand2" if cmd else "", padx=6, pady=1)
             row.pack(side="top", fill="x")
@@ -1974,6 +2003,34 @@ class Predictions:
                     w.bind("<Button-1>", lambda e, c=cmd: c())
             self.rows.append([row] + parts)
         self.paint_selection()
+
+    # --- dragging the list (the spot is kept, relative to the cursor, while you type in this window)
+    def drag_start(self, e):
+        self.dragging = (e.x_root, e.y_root, self.strip.winfo_x(), self.strip.winfo_y())
+
+    def drag_move(self, e):
+        if not getattr(self, "dragging", None):
+            return
+        sx, sy, wx, wy = self.dragging
+        x, y = wx + e.x_root - sx, wy + e.y_root - sy
+        self.strip.geometry(f"+{x}+{y}")
+        w_, h = self.strip.winfo_width(), self.strip.winfo_height()
+        self.strip_rect = (x, y, x + w_, y + h)
+
+    def drag_end(self, e):
+        if not getattr(self, "dragging", None):
+            return
+        self.dragging = None
+        dx = self.strip.winfo_x() - self.strip_default[0]
+        dy = self.strip.winfo_y() - self.strip_default[1]
+        self.drag_offset = (self.buf_hwnd, dx, dy)
+        if self.ghost_point:                        # the grey text stays at the cursor
+            self.place_ghost(self.ghost_point)
+
+    def drag_reset(self, e=None):
+        self.drag_offset = None
+        if self.visible and getattr(self, "last_point", None):
+            self.place_strip(self.last_point)
 
     def paint_selection(self):
         for i, widgets in enumerate(self.rows):
@@ -1997,6 +2054,11 @@ class Predictions:
         left, mtop, right, mbottom = monitor_bounds(x, top)
         y = bottom + 4 if bottom + 4 + h < mbottom else top - h - 4
         x = max(left, min(x, right - w_))
+        self.strip_default, self.last_point = (x, y), point
+        off = getattr(self, "drag_offset", None)
+        if off and off[0] == self.buf_hwnd:          # you moved it: keep it there, relative to the cursor
+            x = max(left, min(x + off[1], right - w_))
+            y = max(mtop, min(y + off[2], mbottom - h))
         self.strip_rect = (x, y, x + w_, y + h)
         w = self.w
         before = w.GetForegroundWindow()
@@ -2089,6 +2151,8 @@ Careter runs quietly in the background. You don't open it: just type anywhere (N
 • ↑ / ↓: choose another suggestion (the grey text follows).
 • 1 – 5: insert that suggestion directly. You can also click it.
 • Esc, or just keep typing: hide the list.
+• In the way? Drag the list by its • • • grip. It stays at that spot while you type in that window; double-click the grip to put it back.
+• Don't want Enter to pick suggestions? Settings → Typing → switch off "Enter also inserts the suggestion".
 • At the start of a sentence, type the first letter and suggestions appear.
 • While the list is showing, ↑ ↓, Tab, Enter and 1–5 belong to Careter; the rest of the time they work as usual (press Esc first if you want a new line).
 • No grey text? Some apps don't tell Windows where the cursor is. The list still appears (at the mouse), just without grey text.
@@ -2496,6 +2560,7 @@ class SettingsWindow:
         switch("predict", "Word suggestions while I type", pred.enabled if pred else PREDICT,
                "(also: double-tap Ctrl)")
         switch("ghost", "Grey text after the cursor (Tab inserts it)", GHOST)
+        switch("enter", "Enter also inserts the suggestion", ENTER_PICKS, "(off: Enter always makes a new line)")
         row = tk.Frame(page, bg=S_BG)
         row.pack(fill="x", pady=2)
         tk.Label(row, text="      Suggestions in the list:", bg=S_BG, fg=S_FG, font=S_FONT).pack(side="left")
@@ -2797,7 +2862,7 @@ class SettingsWindow:
             return False
 
     def changed(self, key):
-        global PREDICT, GHOST, PREDICT_COUNT, AUTOCORRECT, LEARN, PREDICT_ENGINE, PREDICT_IN_TERMINALS
+        global PREDICT, GHOST, PREDICT_COUNT, AUTOCORRECT, LEARN, PREDICT_ENGINE, PREDICT_IN_TERMINALS, ENTER_PICKS
         pred = self.app.predictions
         if key == "count":
             PREDICT_COUNT = self.count.get()
@@ -2817,6 +2882,8 @@ class SettingsWindow:
                     pred.toggle()
             elif key == "ghost":
                 GHOST = v
+            elif key == "enter":
+                ENTER_PICKS = v
             elif key == "autocorrect":
                 AUTOCORRECT = v
             elif key == "learn":

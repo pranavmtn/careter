@@ -9,6 +9,7 @@
   let state = { enabled: true, desktop: false, checked: 0 };
   let timer = null, shown = [], strip = null, box = null, lastFix = null;
   let sel = 0, ghost = null, ghostFor = null;
+  let dragOffset = null, dragging = null, lastDefault = null;   // you can drag the list out of the way
   let pending = false, queued = "";                  // keys typed while a correction is being looked up
   let gen = 0;
 
@@ -138,12 +139,19 @@
       .w.sel{background:#41464f}
       .w:hover{background:#383c44}
       .note{color:#c9ced6;padding:2px 6px}
+      .grip{cursor:move;color:#8f96a3;font-size:9px;text-align:center;letter-spacing:3px;line-height:8px;padding:0 0 3px}
     </style><div class="pill"></div>`;
     box = root.querySelector(".pill");
     box.addEventListener("mousedown", (e) => {        // keep focus in the text box
       e.preventDefault();
+      if (e.target.closest(".grip")) { startDrag(e); return; }
       const w = e.target.closest(".w");
       if (w) accept(+w.dataset.i);
+    });
+    box.addEventListener("dblclick", (e) => {         // double-click the grip: back under the cursor
+      if (!e.target.closest(".grip")) return;
+      dragOffset = null;
+      if (lastDefault) { strip.style.left = `${lastDefault.left}px`; strip.style.top = `${lastDefault.top}px`; }
     });
     document.documentElement.appendChild(host);
     return host;
@@ -154,14 +162,40 @@
     const h = strip.offsetHeight, w = strip.offsetWidth;
     let top = rect.bottom + 6;
     if (top + h > innerHeight - 4) top = rect.top - h - 6;
-    const left = Math.max(4, Math.min(rect.left - 8, innerWidth - w - 4));
-    strip.style.top = `${Math.max(4, top)}px`;
+    let left = Math.max(4, Math.min(rect.left - 8, innerWidth - w - 4));
+    top = Math.max(4, top);
+    lastDefault = { left, top };
+    if (dragOffset) {                                 // you moved it: keep it there, relative to the caret
+      left = Math.max(4, Math.min(left + dragOffset.dx, innerWidth - w - 4));
+      top = Math.max(4, Math.min(top + dragOffset.dy, innerHeight - h - 4));
+    }
+    strip.style.top = `${top}px`;
     strip.style.left = `${left}px`;
+  }
+
+  function startDrag(e) {
+    dragging = { x: e.clientX, y: e.clientY, left: parseFloat(strip.style.left), top: parseFloat(strip.style.top) };
+    const move = (ev) => {
+      strip.style.left = `${dragging.left + ev.clientX - dragging.x}px`;
+      strip.style.top = `${dragging.top + ev.clientY - dragging.y}px`;
+    };
+    const up = () => {
+      document.removeEventListener("mousemove", move, true);
+      document.removeEventListener("mouseup", up, true);
+      if (lastDefault) dragOffset = { dx: parseFloat(strip.style.left) - lastDefault.left,
+                                      dy: parseFloat(strip.style.top) - lastDefault.top };
+      dragging = null;
+    };
+    document.addEventListener("mousemove", move, true);
+    document.addEventListener("mouseup", up, true);
   }
 
   function show(words, rect, el) {
     if (!strip) strip = buildStrip();
     box.textContent = "";
+    const grip = document.createElement("div");
+    grip.className = "grip"; grip.textContent = "• • •"; grip.title = "Drag to move · double-click to reset";
+    box.appendChild(grip);
     words.forEach(([word], i) => {
       const w = document.createElement("div");
       w.className = "w"; w.dataset.i = i;
@@ -177,7 +211,7 @@
   }
 
   function paintSel() {
-    [...box.children].forEach((w, i) => w.classList.toggle("sel", i === sel && shown.length > 1));
+    [...box.querySelectorAll(".w")].forEach((w, i) => w.classList.toggle("sel", i === sel && shown.length > 1));
   }
 
   function move(step) {
@@ -372,7 +406,7 @@
     if (active() && !e.isComposing && target()) schedule(e.data === " " ? 0 : DELAY);
   }, true);
   document.addEventListener("focusin", () => { hide(); refreshState(); }, true);
-  document.addEventListener("mousedown", (e) => { if (strip && e.target !== strip) hide(); lastFix = null; }, true);
+  document.addEventListener("mousedown", (e) => { if (strip && e.target !== strip && !dragging) hide(); lastFix = null; }, true);
   window.addEventListener("scroll", hide, true);
   window.addEventListener("blur", hide);
   refreshState(true);
