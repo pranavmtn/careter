@@ -65,7 +65,7 @@ PREDICT = os.getenv("CARET_PREDICT", "1") != "0"
 PREDICT_ENGINE = os.getenv("CARET_PREDICT_ENGINE", "llm")    # "llm" (smarter) or "ngram" (word counts only)
 PREDICT_LLM_TIMEOUT = 0.6     # if the LLM takes longer, show the word-count suggestions instead
 PREDICT_MODEL = os.getenv("CARET_PREDICT_MODEL", "HuggingFaceTB/SmolLM2-135M")   # llm engine: a *base* model
-PREDICT_DELAY = 0.18          # seconds of no typing before suggestions appear
+PREDICT_DELAY = 0.06          # seconds of no typing before suggestions appear
 PREDICT_COUNT = 5             # suggestions shown, picked with keys 1-5
 PREDICT_IN_TERMINALS = False  # shell commands aren't prose; off by default
 PREDICT_HOTKEY = "double-tap Ctrl (or Ctrl+Alt+P)"  # turns predictions (and auto-correct) on/off
@@ -605,6 +605,8 @@ FONT_B = (FONT[0], FONT[1], "bold")
 WRAP = 380
 # word-prediction strip: a rounded slate-grey pill with white words
 STRIP_BG, STRIP_BORDER, STRIP_FG, STRIP_NUM = "#2b2e35", "#4b505a", "#ffffff", "#8f96a3"
+STRIP_SEL = "#41464f"         # the highlighted row (Tab / Enter-free pick, moved with up/down)
+GHOST_FG = "#9aa0a6"          # grey completion shown right after the cursor
 STRIP_FONT = ("Segoe UI", 11) if IS_WIN else ("Helvetica", 13)
 STRIP_NUM_FONT = ("Segoe UI", 9) if IS_WIN else ("Helvetica", 11)
 STRIP_RADIUS = 14
@@ -1226,6 +1228,9 @@ class Predictions:
         self.predictor = None
         self.buf, self.buf_hwnd, self.buf_proc = "", None, ""
         self.speller, self.last_fix, self.fixing = None, None, False
+        self.fast_predictor = None
+        self.sel, self.rows, self.shown_gen, self.ghost = 0, [], -1, None
+        self.ghost_point, self.ghost_bg = None, (None, None)
         self.user_model = None
         self.last_key_at = 0.0
         self.web = None
@@ -1283,14 +1288,14 @@ class Predictions:
             log("predict: loading word lists…")
             folder = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ngrams")
             ngram = NGramPredictor(folder, log=log)
-            self.predictor = ngram
+            self.predictor = self.fast_predictor = ngram
             personal = lambda engine: engine
             if LEARN:
                 from predict import PersonalPredictor, UserModel
                 self.user_model = UserModel(os.path.join(folder, "user_model.dat"),
                                             legacy=os.path.join(folder, "user_model.json"))
                 personal = lambda engine: PersonalPredictor(engine, self.user_model)
-                self.predictor = personal(ngram)
+                self.predictor = self.fast_predictor = personal(ngram)
                 threading.Thread(target=self.autosave, daemon=True).start()
                 log(f"predict: learning on, knows {len(self.user_model.uni)} of your words")
             if AUTOCORRECT:
@@ -1383,9 +1388,15 @@ class Predictions:
         if down and self.visible and self.shown:
             ctrl, alt, shift, win = self.mods()
             pick = None
-            if vk == 0x09 and not (ctrl or alt or shift or win):          # Tab
-                pick = 0
-            elif not (ctrl or alt or shift or win):
+            plain = not (ctrl or alt or shift or win)
+            if plain and vk in (0x26, 0x28):          # up / down: move the highlight
+                self.swallow_up.add(vk)
+                step = -1 if vk == 0x26 else 1
+                self.app.q.put(lambda: self.move(step))
+                self.kb.suppress_event()
+            if vk == 0x09 and plain:                  # Tab: the highlighted one (= the grey text)
+                pick = min(self.sel, len(self.shown) - 1)
+            elif plain:
                 n = len(self.shown)
                 if 0x31 <= vk < 0x31 + n:              # 1..5 on the number row
                     pick = vk - 0x31
@@ -1519,7 +1530,9 @@ class Predictions:
 
     # --- predict
     def run(self, gen):
-        """Never logs what you typed: only why a suggestion was or wasn't shown."""
+        """Two passes: an instant one (typed keys or the browser helper + word lists, at the Win32 caret)
+        so something shows within ~0.1 s, then the full one (UI Automation text + LLM) that replaces it
+        if it's different. Never logs what you typed: only why a suggestion was or wasn't shown."""
         why = lambda msg: DEBUG and log("predict: " + msg)
         try:
             if gen != self.gen or not self.enabled:
@@ -1534,14 +1547,29 @@ class Predictions:
             if self.app.session and self.app.session.acting:
                 return
             web = self.web.fresh(self.last_key_at) if (self.web and proc in BROWSERS) else None
+            if web and web.get("password"):
+                return why("skipped, password box (browser)")
+
+            # pass 1: instant
+            first = None
+            fast_text = (web.get("text") or "") if web else self.buf
+            fast_point = web_point(web, hwnd) if web else caret_rect()
+            if self.fast_predictor and fast_text.strip() and fast_point:
+                words = self.fast_predictor.predict(fast_text, PREDICT_COUNT)
+                if words and gen == self.gen:
+                    first = (words, fast_point)
+                    self.app.q.put(lambda w=words, pt=fast_point: self.show(w, pt, gen, exact=True))
+            if web and self.predictor is self.fast_predictor:
+                return                         # nothing better to wait for
+
+            # pass 2: full
             uia = None
-            if web:                            # the browser extension told us exactly
-                if web.get("password"):
-                    return why("skipped, password box (browser)")
+            if web:
                 source, text = "web", web.get("text") or ""
             else:
-                uia = run_with_timeout(lambda: read_before_caret(300), 0.4)
+                uia = run_with_timeout(lambda: read_before_caret(300), 0.3)
                 if uia and uia[2]:
+                    self.app.q.put(lambda: gen == self.gen and self.hide())
                     return why("skipped, password box")
                 source = "uia" if uia and uia[0].strip() else "keys"
                 text = uia[0] if source == "uia" else self.buf
@@ -1555,18 +1583,22 @@ class Predictions:
             if gen != self.gen:
                 return
             if not words:
-                return why(f"no suggestions ({source}, {len(text)} chars, ends {'space' if text[-1] == ' ' else 'mid-word' if text[-1].isalnum() else 'punct'}, {ms:.0f}ms)")
+                return why(f"no suggestions ({source}, {len(text)} chars, {ms:.0f}ms)")
             where, point = "uia", (uia[1] if uia else None)
             if web:
-                point, where = web_point(web, hwnd), "web"
+                point, where = fast_point, "web"
             if not point:
                 point, where = caret_rect(), "caret"
+            exact = bool(point)
             if not point:
                 mx, my = pyautogui.position()
                 point, where = (mx, my, my + 16), "mouse"
             engine = getattr(self.predictor, "last", "ngram")
-            why(f"{len(words)} words by {engine} in {ms:.0f}ms from {source} in {proc}, strip at {where} {point[0]},{point[2]}")
-            self.app.q.put(lambda: self.show(words, point, gen))
+            why(f"{len(words)} words by {engine} in {ms:.0f}ms from {source} in {proc}, at {where}"
+                + (" (updated)" if first else ""))
+            if first and first[0] == words and first[1] == point:
+                return                         # pass 1 already showed exactly this
+            self.app.q.put(lambda w=words, pt=point, ex=exact: self.show(w, pt, gen, exact=ex))
         except Exception:
             log("predict failed:\n" + traceback.format_exc())
 
@@ -1608,7 +1640,7 @@ class Predictions:
         win.overrideredirect(True)
         win.attributes("-topmost", True)
         win.configure(bg=STRIP_BG)
-        self.strip_box = tk.Frame(win, bg=STRIP_BG, padx=12, pady=6)
+        self.strip_box = tk.Frame(win, bg=STRIP_BG, padx=6, pady=6)
         self.strip_box.pack()
         win.geometry("+-2000+-2000")
         win.update_idletasks()
@@ -1623,6 +1655,81 @@ class Predictions:
         w.ShowWindow(self.strip_hwnd, 0)            # SW_HIDE
         self.strip_checked = False
         self.round_native = self.round_corners()
+        self.build_ghost()
+
+    def build_ghost(self):
+        """The grey completion right after the cursor: a borderless, click-through window whose
+        background colour is made transparent, so only the grey letters show."""
+        g = self.ghost = tk.Toplevel(self.app.root)
+        g.overrideredirect(True)
+        g.attributes("-topmost", True)
+        self.ghost_key = "#010203"
+        g.configure(bg=self.ghost_key)
+        g.attributes("-transparentcolor", self.ghost_key)
+        self.ghost_label = tk.Label(g, text="", bg=self.ghost_key, fg=GHOST_FG, bd=0, padx=0, pady=0)
+        self.ghost_label.pack()
+        g.geometry("+-2000+-2000")
+        g.update_idletasks()
+        self.ghost_hwnd = self.w.GetAncestor(g.winfo_id(), 2)
+        WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT = 0x08000000, 0x80, 0x20
+        style = self.w.GetWindowLongW(self.ghost_hwnd, -20)
+        self.w.SetWindowLongW(self.ghost_hwnd, -20, style | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TRANSPARENT)
+        try:
+            g.attributes("-disabled", True)
+        except tk.TclError:
+            pass
+        self.w.ShowWindow(self.ghost_hwnd, 0)
+
+    def line_background(self, x, top, bottom):
+        """Colour of the empty space right after the cursor, or None if there's text there (then a
+        grey completion would overlap it, so we don't show one)."""
+        import ctypes
+        u, g = ctypes.WinDLL("user32"), ctypes.WinDLL("gdi32")
+        u.GetDC.restype = ctypes.c_void_p
+        u.GetDC.argtypes = [ctypes.c_void_p]
+        u.ReleaseDC.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        g.GetPixel.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int]
+        g.GetPixel.restype = ctypes.c_uint32
+        dc = u.GetDC(None)
+        try:
+            ys = (top + (bottom - top) // 3, top + (bottom - top) // 2, top + 2 * (bottom - top) // 3)
+            colors = {g.GetPixel(dc, int(x + dx), int(y)) for dx in (4, 10, 18, 30, 45) for y in ys}
+        finally:
+            u.ReleaseDC(None, dc)
+        if len(colors) != 1:
+            return None
+        c = colors.pop()
+        if c == 0xFFFFFFFF:                            # CLR_INVALID: off screen
+            return None
+        return f"#{c & 0xFF:02x}{(c >> 8) & 0xFF:02x}{(c >> 16) & 0xFF:02x}"
+
+    def place_ghost(self, point):
+        if not self.ghost or not self.shown:
+            return
+        text = self.shown[self.sel][1].rstrip(" ")
+        x, top, bottom = point
+        if self.ghost_bg[0] == point:                  # same spot (arrow keys, better words arrived):
+            bg = self.ghost_bg[1]                      # don't re-read the screen, our grey text is on it
+        else:
+            self.w.ShowWindow(self.ghost_hwnd, 0)
+            bg = self.line_background(x, top, bottom)
+            self.ghost_bg = (point, bg)
+        bg = bg if text else None
+        if not bg:
+            self.w.ShowWindow(self.ghost_hwnd, 0)
+            return
+        # the transparent colour = the line's own background, so the grey text's smoothed edges
+        # blend into it and look like part of the app
+        self.ghost.configure(bg=bg)
+        self.ghost.attributes("-transparentcolor", bg)
+        px = max(10, min(48, round((bottom - top) * 0.72)))
+        self.ghost_label.configure(text=text, bg=bg, font=(STRIP_FONT[0], -px))
+        self.ghost.update_idletasks()
+        h = self.ghost.winfo_reqheight()
+        self.ghost.geometry(f"+{int(x) + 1}+{int(top + ((bottom - top) - h) / 2)}")
+        self.ghost.update_idletasks()
+        self.w.ShowWindow(self.ghost_hwnd, 4)          # SW_SHOWNOACTIVATE
+        self.w.SetWindowPos(self.ghost_hwnd, -1, 0, 0, 0, 0, 0x1 | 0x2 | 0x10)
 
     def round_corners(self):
         """Windows 11: smooth rounded corners and a thin border drawn by the system. True if it worked;
@@ -1656,21 +1763,41 @@ class Predictions:
         self.w.SetWindowRgn(self.strip_hwnd, rgn, True)              # Windows owns the region now
 
     def fill(self, items):
+        """A vertical list: one row per suggestion (number, word); self.sel is highlighted."""
         for child in self.strip_box.winfo_children():
             child.destroy()
+        self.rows = []
         for i, (label, hint, cmd) in enumerate(items):
-            cell = tk.Frame(self.strip_box, bg=STRIP_BG, cursor="hand2" if cmd else "")
-            cell.pack(side="left", padx=(0 if i == 0 else 14, 0))
+            row = tk.Frame(self.strip_box, bg=STRIP_BG, cursor="hand2" if cmd else "", padx=6, pady=1)
+            row.pack(side="top", fill="x")
             parts = []
             if hint:                                   # the key that picks it, before the word
-                parts.append(tk.Label(cell, text=hint, bg=STRIP_BG, fg=STRIP_NUM, font=STRIP_NUM_FONT))
-            weight = (STRIP_FONT[0], STRIP_FONT[1], "bold") if (i == 0 and hint) else STRIP_FONT
-            parts.append(tk.Label(cell, text=label, bg=STRIP_BG, fg=STRIP_FG, font=weight, padx=3))
+                parts.append(tk.Label(row, text=hint, bg=STRIP_BG, fg=STRIP_NUM, font=STRIP_NUM_FONT,
+                                      width=2, anchor="e"))
+            parts.append(tk.Label(row, text=label, bg=STRIP_BG, fg=STRIP_FG, font=STRIP_FONT,
+                                  padx=6, anchor="w"))
             for w in parts:
                 w.pack(side="left")
             if cmd:
-                for w in [cell] + parts:
+                for w in [row] + parts:
                     w.bind("<Button-1>", lambda e, c=cmd: c())
+            self.rows.append([row] + parts)
+        self.paint_selection()
+
+    def paint_selection(self):
+        for i, widgets in enumerate(self.rows):
+            bg = STRIP_SEL if (i == self.sel and len(self.rows) > 1) else STRIP_BG
+            for w in widgets:
+                w.configure(bg=bg)
+
+    def move(self, step):
+        """Up/down arrows: move the highlight (wraps around) and update the grey text."""
+        if not self.visible or not self.shown:
+            return
+        self.sel = (self.sel + step) % len(self.shown)
+        self.paint_selection()
+        if self.ghost_point:
+            self.place_ghost(self.ghost_point)
 
     def place_strip(self, point):
         x, top, bottom = point
@@ -1701,27 +1828,36 @@ class Predictions:
             log("predict: strip took focus, giving it back")
             self.w.SetForegroundWindow(hwnd)
 
-    def show(self, words, point, gen):
+    def show(self, words, point, gen, exact=True):
         if gen != self.gen or not self.strip:
             return
+        if self.visible and self.shown_gen == gen and self.sel != 0:
+            return                             # you're already choosing: don't reshuffle the list
         try:
-            self._show(words, point)
+            self._show(words, point, gen, exact)
         except Exception:
             log("predict: strip failed:\n" + traceback.format_exc())
 
-    def _show(self, words, point):
+    def _show(self, words, point, gen, exact):
+        self.sel, self.shown_gen = 0, gen
+        self.shown, self.visible = list(words), True
         items = [(w, str(i + 1),
-                  lambda c=(w, ins): threading.Thread(target=self.accept, args=(c,), daemon=True).start())
+                  lambda i=i: threading.Thread(target=self.accept, args=(self.shown[i],), daemon=True).start())
                  for i, (w, ins) in enumerate(words)]
         self.fill(items)
-        self.shown, self.visible = list(words), True
         self.place_strip(point)
+        self.ghost_point = point if exact else None
+        if self.ghost_point:
+            self.place_ghost(point)
+        elif self.ghost:
+            self.w.ShowWindow(self.ghost_hwnd, 0)
 
     def flash(self, text, point):
         if not self.strip:
             return
+        self.sel = 0
         self.fill([(text, "", None)])
-        self.shown, self.visible = [], True
+        self.shown, self.visible, self.ghost_point = [], True, None
         self.place_strip(point)
         g = self.gen
         self.strip.after(1200, lambda: self.gen == g and self.hide())
@@ -1730,7 +1866,11 @@ class Predictions:
         was = self.visible
         self.visible, self.shown = False, []
         if was and self.strip:
-            self.app.q.put(lambda: self.w.ShowWindow(self.strip_hwnd, 0))
+            def _hide():
+                self.w.ShowWindow(self.strip_hwnd, 0)
+                if self.ghost:
+                    self.w.ShowWindow(self.ghost_hwnd, 0)
+            self.app.q.put(_hide)
 
 
 class App:
@@ -1742,7 +1882,7 @@ class App:
         self.triggering = False
         self.last_trigger = 0.0
         self.log_start = 0
-        self.root.after(30, self.pump)
+        self.root.after(15, self.pump)
         self.predictions = None
         if IS_WIN:
             try:

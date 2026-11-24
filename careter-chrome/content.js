@@ -5,9 +5,10 @@
   if (window.__careterLoaded) return;
   window.__careterLoaded = true;
 
-  const MAX = 300, DELAY = 150, COUNT = 5;
+  const MAX = 300, DELAY = 50, COUNT = 5;
   let state = { enabled: true, desktop: false, checked: 0 };
   let timer = null, shown = [], strip = null, box = null, lastFix = null;
+  let sel = 0, ghost = null, ghostFor = null;
   let pending = false, queued = "";                  // keys typed while a correction is being looked up
   let gen = 0;
 
@@ -55,6 +56,16 @@
     before.selectNodeContents(el);
     before.setEnd(r.startContainer, r.startOffset);
     return before.toString().slice(-MAX).replace(/\u00a0/g, " ");
+  }
+
+  function textAfter(el) {
+    if (isField(el)) return el.value.slice(el.selectionEnd, el.selectionEnd + 40);
+    const s2 = getSelection();
+    if (!s2 || !s2.rangeCount) return "x";
+    const r = s2.getRangeAt(0), after = document.createRange();
+    after.selectNodeContents(el);
+    after.setStart(r.endContainer, r.endOffset);
+    return after.toString().slice(0, 40);
   }
 
   const MIRROR = ["boxSizing", "width", "height", "overflowX", "overflowY", "borderTopWidth", "borderRightWidth",
@@ -119,14 +130,14 @@
     host.style.cssText = "all:initial;position:fixed;z-index:2147483647;left:0;top:0;display:none;";
     const root = host.attachShadow({ mode: "closed" });
     root.innerHTML = `<style>
-      .pill{display:flex;gap:14px;align-items:center;padding:6px 12px;background:#2b2e35;color:#fff;
-        border:1px solid #4b505a;border-radius:14px;box-shadow:0 6px 20px rgba(0,0,0,.28);
+      .pill{display:flex;flex-direction:column;gap:1px;padding:5px;background:#2b2e35;color:#fff;
+        border:1px solid #4b505a;border-radius:12px;box-shadow:0 6px 20px rgba(0,0,0,.28);min-width:120px;
         font:14px/1.3 "Segoe UI",system-ui,-apple-system,sans-serif;white-space:nowrap;user-select:none}
-      .w{cursor:pointer;display:flex;gap:4px;align-items:baseline}
-      .w b{color:#8f96a3;font-size:11px;font-weight:600}
-      .w:first-child span{font-weight:600}
-      .w:hover span{text-decoration:underline}
-      .note{color:#c9ced6}
+      .w{cursor:pointer;display:flex;gap:8px;align-items:baseline;padding:3px 8px;border-radius:7px}
+      .w b{color:#8f96a3;font-size:11px;font-weight:600;width:10px;text-align:right}
+      .w.sel{background:#41464f}
+      .w:hover{background:#383c44}
+      .note{color:#c9ced6;padding:2px 6px}
     </style><div class="pill"></div>`;
     box = root.querySelector(".pill");
     box.addEventListener("mousedown", (e) => {        // keep focus in the text box
@@ -148,7 +159,7 @@
     strip.style.left = `${left}px`;
   }
 
-  function show(words, rect) {
+  function show(words, rect, el) {
     if (!strip) strip = buildStrip();
     box.textContent = "";
     words.forEach(([word], i) => {
@@ -158,8 +169,44 @@
       const s = document.createElement("span"); s.textContent = word;
       w.append(n, s); box.appendChild(w);
     });
-    shown = words;
+    shown = words; sel = 0;
+    paintSel();
     place(rect);
+    ghostFor = { el, rect };
+    drawGhost();
+  }
+
+  function paintSel() {
+    [...box.children].forEach((w, i) => w.classList.toggle("sel", i === sel && shown.length > 1));
+  }
+
+  function move(step) {
+    if (!shown.length) return;
+    sel = (sel + step + shown.length) % shown.length;
+    paintSel();
+    drawGhost();
+  }
+
+  // Grey completion right after the caret, in the text box's own font. Only when nothing follows the
+  // caret on that line (otherwise it would cover your text).
+  function drawGhost() {
+    if (!ghost) {
+      ghost = document.createElement("div");
+      ghost.style.cssText = "all:initial;position:fixed;z-index:2147483646;pointer-events:none;white-space:pre;display:none;";
+      document.documentElement.appendChild(ghost);
+    }
+    const g = ghostFor, item = shown[sel];
+    const after = g && g.el ? textAfter(g.el) : "x";
+    if (!g || !item || (after && !/^\s*(\n|$)/.test(after))) { ghost.style.display = "none"; return; }
+    const cs = getComputedStyle(g.el);
+    ghost.textContent = item[1].replace(/ $/, "");
+    ghost.style.font = cs.font;
+    ghost.style.letterSpacing = cs.letterSpacing;
+    ghost.style.color = "rgba(128,134,142,.85)";
+    ghost.style.left = `${g.rect.left}px`;
+    ghost.style.display = "block";
+    const h = ghost.offsetHeight;
+    ghost.style.top = `${g.rect.top + (g.rect.bottom - g.rect.top - h) / 2}px`;
   }
 
   function note(text, rect) {
@@ -167,15 +214,17 @@
     box.innerHTML = "";
     const s = document.createElement("span"); s.className = "note"; s.textContent = text;
     box.appendChild(s);
-    shown = [];
+    shown = []; ghostFor = null;
+    if (ghost) ghost.style.display = "none";
     place(rect);
     const g = ++gen;
     setTimeout(() => { if (g === gen) hide(); }, 1200);
   }
 
   function hide() {
-    shown = [];
+    shown = []; ghostFor = null;
     if (strip) strip.style.display = "none";
+    if (ghost) ghost.style.display = "none";
   }
 
   // ---------------------------------------------------------------- predict
@@ -195,7 +244,7 @@
     if (!text || !text.trim()) return;
     const { words } = await ask({ type: "predict", text, n: COUNT });
     if (g !== gen || !words || !words.length || target() !== el) return;
-    show(words, caretRect(el));
+    show(words, caretRect(el), el);
   }
 
   function accept(i) {
@@ -298,8 +347,11 @@
     }
     const plain = !(e.ctrlKey || e.metaKey || e.altKey);
     if (shown.length && plain && !e.shiftKey) {
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+        e.preventDefault(); e.stopPropagation(); move(e.key === "ArrowDown" ? 1 : -1); return;
+      }
       const m = /^(?:Digit|Numpad)([1-5])$/.exec(e.code);
-      const i = m ? +m[1] - 1 : e.key === "Tab" ? 0 : -1;
+      const i = m ? +m[1] - 1 : e.key === "Tab" ? sel : -1;
       if (i >= 0 && i < shown.length) { e.preventDefault(); e.stopPropagation(); accept(i); return; }
     }
     if (e.key === "Escape") { hide(); return; }

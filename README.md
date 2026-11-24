@@ -25,8 +25,9 @@ When the bubble opens it first says what it sees and offers 2–4 one-click next
 
 While you type anywhere, Careter suggests the next word, or the rest of the word you're typing, in a small strip at the caret:
 
-- Up to **5 suggestions**, numbered. Press **1–5** to insert one (**Tab** also takes the first). After you accept, it suggests the word after that.
-- Keep typing or press **Esc** and the strip goes away. Number keys and Tab behave normally whenever the strip isn't showing.
+- The top suggestion appears as **grey text right after the cursor**; **Tab** inserts it. Below the line, a vertical list shows up to **5 suggestions**: **↑ / ↓** move the highlight (the grey text follows), **Tab** inserts the highlighted one, **1–5** insert one directly. After you accept, it suggests the word after that.
+- Fast: word-list suggestions show about 0.1 s after you pause; if the LLM finds better ones, the list updates in place. The grey text is skipped when there's already text after the cursor on that line, or when the app doesn't report where the cursor is.
+- Keep typing or press **Esc** and the strip goes away. Number keys, arrows and Tab behave normally whenever the list isn't showing.
 - **Auto-correct:** when you press space after a typo, it's fixed: famous typos ("teh" → "the", "adn" → "and"), one-letter mistakes ("recevie" → "receive"), and two-letter mistakes in words of 7+ letters ("definatly" → "definitely"), and up to three in words of 9+ letters ("aknoldgement" → "acknowledgement"). Fixes keep the first letter and aim only at common words. Press **Backspace** right after to put back what you typed; that word is then never corrected again (saved, encrypted, in `ngrams/user_words.dat`). It only touches lowercase words of 3+ letters that follow another word, so names, ACRONYMS, numbers, the first word in a box (usernames, passwords) and terminals are left alone. `CARET_AUTOCORRECT=0` turns it off.
 - **Learns from you:** it counts the words you type and which word you type after which, and puts your own habits first (up to 3 of the 5 slots). A pair counts after you've typed it twice; a word completion after 3 uses. Words you use 3+ times are never auto-corrected. Stored only on your PC as single words and word pairs (never sentences) in `ngrams/user_model.dat`, saved every 30 s and **encrypted with your Windows login** (DPAPI): only your Windows account on this PC can read it, with no password to manage. `CARET_LEARN=0` turns learning off. Nothing is learned in terminals, from the first word in a box, or while prediction is off.
 - **Double-tap Ctrl** (or Ctrl+Alt+P) turns prediction and auto-correct off and on, e.g. when you need to type numbers or Manglish. A label at the mouse shows which.
@@ -61,7 +62,7 @@ Privacy: it talks only to Careter on this PC (`127.0.0.1:47822`, which accepts o
 
 `careter-chrome/` does word prediction inside the browser on its own, with no desktop app. It works on any computer with Chrome or Edge (Windows, Mac, Chromebook, Linux):
 
-- 5 suggestions in a rounded strip under the caret on any website; **1–5** or **Tab** picks, or click.
+- Grey completion right after the caret (in the page's own font) plus a vertical list of 5 suggestions; **↑ / ↓** to choose, **Tab** inserts the highlighted one, **1–5** or a click picks directly.
 - Auto-correct on space (same rules as the desktop: famous typos, 1–3 letter mistakes by word length). **Backspace** right after undoes it, and that word is never corrected again.
 - Learns your words and word pairs. **Double-tap Ctrl**, or click the toolbar icon, turns it off and on.
 - Ignores password, email, phone, number and login- or card-looking fields.
