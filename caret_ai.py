@@ -1314,6 +1314,7 @@ class Predictions:
         self.ghost_point, self.ghost_bg = None, (None, None)
         self.uia = UiaReader()
         self.epoch, self.last_exact = 0, None       # last exact caret spot in this window (for pass 1)
+        self.last_seen = None                       # (window, epoch, text) read while you typed
         self.user_model = None
         self.last_key_at = 0.0
         self.web = None
@@ -1540,17 +1541,39 @@ class Predictions:
         if not m:
             return None
         word, before = m.group(1), self.buf[: m.start()]
-        # Only a word that follows another word in this box: never the first thing typed in a field
-        # (that protects passwords and usernames), and never glued to symbols like "x.teh" or "@teh".
-        if not before.strip() or not before[-1].isspace():
+        if not before.strip():
+            # The typed-keys buffer starts at this word (e.g. you clicked into existing text). If the
+            # text read from the app while you typed it shows words before it, it isn't the first word
+            # in the box, so it may be corrected.
+            ls = getattr(self, "last_seen", None)
+            seen = ls[2] if (ls and ls[0] == self.buf_hwnd and ls[1] == self.epoch) else ""
+            typed = re.search(r"([^\W\d_]*)\Z", seen).group(1)     # the part of this word typed then
+            context = seen[: len(seen) - len(typed)] if (seen and word.startswith(typed)) else ""
+            if context.strip() and context[-1].isspace():
+                before = context
+            else:
+                self.fix_why("first word in a box (could be a username or password)")
+                return None
+        # Never the first thing typed in a field (protects passwords and usernames), and never
+        # glued to symbols like "x.teh" or "@teh".
+        if not before[-1].isspace():
             return None
         tail = before.rstrip()
         pm = re.search(r"([^\W\d_]+)\Z", tail)
         prev = pm.group(1).lower() if (pm and tail[-1] not in ".!?") else None
+        if not word.islower():
+            self.fix_why("capitalised word (names and acronyms are left alone)")
+            return None
         new = self.speller.correct(word, prev)
         if not new or new == word:
             return None
         return lambda: self.apply_fix(word, new)
+
+    def fix_why(self, reason):
+        """Log why a word wasn't corrected, once per change (never the word itself)."""
+        if reason != getattr(self, "last_fix_why", None):
+            self.last_fix_why = reason
+            log(f"predict: auto-correct skipped: {reason}")
 
     def in_browser_password(self):
         web = getattr(self, "web", None)
@@ -1683,6 +1706,8 @@ class Predictions:
                 text = uia[0] if source == "uia" else self.buf
             if gen != self.gen:
                 return
+            if source in ("uia", "web") and text.strip():
+                self.last_seen = (hwnd, self.epoch, text)  # lets auto-correct see words before a click
             if not text.strip():
                 return why(f"no text before caret in {proc} (uia={'yes' if uia else 'no'})")
             if not worth_predicting(text):
@@ -2314,6 +2339,20 @@ class SettingsWindow:
         tk.Label(row, text="saved in the .env file in the Careter folder", bg=S_BG, fg=S_MUTED,
                  font=S_SMALL).pack(side="left", padx=8)
 
+        header("My words")
+        tk.Label(page, text="Words you use that it should always offer and never auto-correct "
+                 "(product names, tech terms, Manglish…). Separate with spaces or commas.",
+                 bg=S_BG, fg=S_MUTED, font=S_SMALL, anchor="w", justify="left", wraplength=640).pack(fill="x")
+        self.mine_text = tk.Text(page, height=3, width=70, bg=S_SOFT, fg=S_FG, insertbackground=S_FG,
+                                 relief="flat", font=S_FONT, wrap="word", highlightthickness=1,
+                                 highlightbackground=S_LINE, highlightcolor=S_DARK)
+        um = pred.user_model if pred else None
+        self.mine_text.insert("1.0", " ".join(sorted(um.mine)) if um else "")
+        self.mine_text.pack(fill="x", pady=(4, 4))
+        row = tk.Frame(page, bg=S_BG)
+        row.pack(fill="x")
+        self.button(row, "Save my words", self.save_mine, primary=True).pack(side="left")
+
         header("Learning  (stays on this PC, encrypted)")
         switch("learn", "Learn my words and phrases", LEARN)
         row = tk.Frame(page, bg=S_BG)
@@ -2324,6 +2363,17 @@ class SettingsWindow:
         switch("autostart", "Start with Windows and keep running", self.autostart_on() if IS_WIN else False)
         tk.Label(page, text="New here? See the How to use tab.", bg=S_BG, fg=S_MUTED,
                  font=S_SMALL, anchor="w").pack(fill="x", pady=(14, 4))
+
+    def save_mine(self):
+        pred = self.app.predictions
+        if not pred or not pred.user_model:
+            self.say("Turn on learning (and restart) to keep your own words.")
+            return
+        words = [w for w in re.split(r"[\s,;]+", self.mine_text.get("1.0", "end")) if w]
+        pred.user_model.set_mine(words)
+        pred.save_learned()
+        self.say(f"Saved {len(pred.user_model.mine)} words.")
+        log(f"settings: my words saved ({len(pred.user_model.mine)})")
 
     def save_ai(self):
         """Save the assistant's model, key and address, switch to them now, and test them."""

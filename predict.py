@@ -12,6 +12,7 @@ import re
 import threading
 
 from names import NAMES                    # personal names are never suggested
+from vocab import BOOST                    # everyday work/tech words, ranked higher
 
 os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")   # harmless on Windows without symlinks
 
@@ -323,6 +324,9 @@ class NGramPredictor:
             with open(cache, "wb") as f:
                 pickle.dump((self.words, self.bi), f, protocol=pickle.HIGHEST_PROTOCOL)
         self.lock = threading.Lock()
+        known = set(self.words)
+        self.words = self.words + sorted(w for w in BOOST if w not in known)   # jira, hotfix, llm...
+        self.rank = {w: i for i, w in enumerate(self.words)}
         self.by1, self.by2 = {}, {}                     # first letter(s) -> words, most common first
         for w in self.words:
             self.by1.setdefault(w[0], []).append(w)
@@ -372,10 +376,35 @@ class NGramPredictor:
                 break
         if len(picks) < n:
             pool = self.by2.get(p[:2], []) if len(p) >= 2 else self.by1.get(p, []) if p else self.words
-            for w in pool:
-                add(w)
-                if len(picks) >= n:
-                    break
+            if p:
+                # completing a word: everyday work words (vocab.py) rank as if far more common
+                cands = []
+                for w in pool:
+                    if len(w) > len(p) and w.startswith(p):
+                        cands.append(w)
+                        if len(cands) >= 300:
+                            break
+                cands += [w for w in BOOST if len(w) > len(p) and w.startswith(p) and w not in cands]
+                eff = lambda w: self.rank.get(w, 10**6) * (0.03 if w in BOOST else 1)
+                ordered = sorted(cands, key=eff)
+                boosted = 0
+                for w in ordered:                       # at most 2 boosted words while others remain
+                    if w in BOOST:
+                        if boosted >= 2:
+                            continue
+                        boosted += 1
+                    add(w)
+                    if len(picks) >= n:
+                        break
+                for w in ordered:                       # only boosted words left: fill up with them
+                    if len(picks) >= n:
+                        break
+                    add(w)
+            else:
+                for w in pool:
+                    add(w)
+                    if len(picks) >= n:
+                        break
         return [shape(w, partial, start) for w in picks[:n]]
 
 
@@ -486,8 +515,10 @@ class Speller:
     def correct(self, word, prev=None):
         if not word.isalpha() or not word.islower() or word in self.user:
             return None
-        if self.user_model and self.user_model.count(word) >= 3:
-            return None                                 # you type this word a lot: it's yours
+        if word in BOOST:
+            return None                                 # an everyday work word (vocab.py)
+        if self.user_model and (self.user_model.count(word) >= 3 or word in self.user_model.mine):
+            return None                                 # you type this word a lot, or added it: it's yours
         if word in COMMON_TYPOS:
             return COMMON_TYPOS[word]
         if len(word) < 3:
@@ -631,11 +662,12 @@ class UserModel:
         import json
         self.path, self.legacy, self.dirty = path, legacy, False
         self.lock = threading.Lock()
-        self.uni, self.bi = {}, {}
+        self.uni, self.bi, self.mine = {}, {}, set()
         raw, from_legacy = read_private(path, legacy)
         if raw:
             data = json.loads(raw.decode("utf-8"))
             self.uni, self.bi = data.get("words", {}), data.get("pairs", {})
+            self.mine = set(data.get("mine", []))      # words you added in Settings → My words
             self.dirty = from_legacy                    # re-save encrypted, then drop the plain file
             if any(w in NAMES for w in self.uni):       # forget names learned before this rule
                 self.uni = {w: c for w, c in self.uni.items() if w not in NAMES}
@@ -645,7 +677,8 @@ class UserModel:
 
     def export(self):
         with self.lock:
-            return {"words": dict(self.uni), "pairs": {a: dict(d) for a, d in self.bi.items()}}
+            return {"words": dict(self.uni), "pairs": {a: dict(d) for a, d in self.bi.items()},
+                    "mine": sorted(self.mine)}
 
     def learn(self, prev, word):
         if word in NAMES:
@@ -659,8 +692,15 @@ class UserModel:
                 d[word] = d.get(word, 0) + 1
             self.dirty = True
 
+    def set_mine(self, words):
+        """Settings → My words: always suggested when you start typing them, never auto-corrected."""
+        with self.lock:
+            self.mine = {w.lower() for w in words if w.strip()}
+            self.dirty = True
+
     def suggest(self, prev, p, n):
-        """Your own likely words: after `prev` (seen 2+ times), then completions of `p` (used 3+ times)."""
+        """Your own likely words: after `prev` (seen 2+ times), then your added words and completions of
+        `p` you've used 2+ times."""
         with self.lock:
             out = []
             after = self.bi.get(prev, {}) if prev else {}
@@ -668,10 +708,13 @@ class UserModel:
                 if c >= 2 and len(w) > len(p) and w.startswith(p) and w not in out and w not in NAMES:
                     out.append(w)
             if p:
+                for w in sorted(self.mine, key=lambda w: (-self.uni.get(w, 0), w)):
+                    if len(w) > len(p) and w.startswith(p) and w not in out:
+                        out.append(w)
                 for w, c in sorted(self.uni.items(), key=lambda kv: -kv[1]):
                     if len(out) >= n:
                         break
-                    if c >= 3 and len(w) > len(p) and w.startswith(p) and w not in out and w not in NAMES:
+                    if c >= 2 and len(w) > len(p) and w.startswith(p) and w not in out and w not in NAMES:
                         out.append(w)
             return out[:n]
 
@@ -687,7 +730,7 @@ class UserModel:
             if pairs > self.MAX_PAIRS:                  # forget one-off pairs first
                 self.bi = {a: {b: c for b, c in d.items() if c > 1} for a, d in self.bi.items()}
                 self.bi = {a: d for a, d in self.bi.items() if d}
-            data = json.dumps({"words": self.uni, "pairs": self.bi}, ensure_ascii=False)
+            data = json.dumps({"words": self.uni, "pairs": self.bi, "mine": sorted(self.mine)}, ensure_ascii=False)
             self.dirty = False
         write_private(self.path, data.encode("utf-8"), self.legacy)
 
