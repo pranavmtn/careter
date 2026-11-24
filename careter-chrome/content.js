@@ -228,11 +228,11 @@
   }
 
   // ---------------------------------------------------------------- predict
-  function schedule() {
+  function schedule(delay = DELAY) {
     hide();
     const g = ++gen;
     clearTimeout(timer);
-    timer = setTimeout(() => predict(g), DELAY);
+    timer = setTimeout(() => predict(g), delay);
   }
 
   async function predict(g) {
@@ -255,7 +255,7 @@
     hide();
     replaceBefore(el, 0, item[1]);
     learnFrom(before + item[1]);
-    schedule();                                      // suggest the word after it straight away
+    schedule(0);                                     // suggest the word after it straight away
   }
 
   // ---------------------------------------------------------------- learning & auto-correct
@@ -366,7 +366,9 @@
   }, true);
 
   document.addEventListener("keyup", ctrlKey, true);
-  document.addEventListener("input", (e) => { if (active() && !e.isComposing && target()) schedule(); }, true);
+  document.addEventListener("input", (e) => {         // after a space the next word is wanted at once
+    if (active() && !e.isComposing && target()) schedule(e.data === " " ? 0 : DELAY);
+  }, true);
   document.addEventListener("focusin", () => { hide(); refreshState(); }, true);
   document.addEventListener("mousedown", (e) => { if (strip && e.target !== strip) hide(); lastFix = null; }, true);
   window.addEventListener("scroll", hide, true);

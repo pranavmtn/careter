@@ -359,14 +359,27 @@ def read_before_caret(chars=300):
         return None
     import uiautomation as auto
     with auto.UIAutomationInitializerInThread():
-        ctrl, tp = auto.GetFocusedControl(), None
-        if ctrl is None:
-            return None
-        try:
-            if ctrl.IsPassword:
-                return "", None, True
-        except Exception:
-            pass
+        return _read_before(auto, chars, {})
+
+
+def _read_before(auto, chars, cache):
+    """read_before_caret's work, on a thread that already set up UI Automation. `cache` remembers
+    which element held the text for the focused control, so the next read skips the search."""
+    ctrl, tp = auto.GetFocusedControl(), None
+    if ctrl is None:
+        return None
+    try:
+        if ctrl.IsPassword:
+            return "", None, True
+    except Exception:
+        pass
+    try:
+        key = tuple(ctrl.GetRuntimeId() or ())
+    except Exception:
+        key = None
+    if key and cache.get("key") == key:
+        tp = cache.get("tp")
+    else:
         for _ in range(6):
             if not ctrl:
                 break
@@ -374,24 +387,60 @@ def read_before_caret(chars=300):
             if tp:
                 break
             ctrl = ctrl.GetParentControl()
-        sel = tp.GetSelection() if tp else None
-        if not sel:
-            return None
-        caret = sel[0]
-        START, END = auto.TextPatternRangeEndpoint.Start, auto.TextPatternRangeEndpoint.End
-        b = caret.Clone()
-        b.MoveEndpointByRange(END, caret, START)
-        b.MoveEndpointByUnit(START, auto.TextUnit.Character, -chars)
-        text = b.GetText(chars * 4).replace("\r\n", "\n").replace("\r", "\n")
-        point = None
-        try:
-            rects = b.GetBoundingRectangles()
-            if rects:
-                r = rects[-1]                          # the line the caret is on
-                point = (r.right, r.top, r.bottom)
-        except Exception:
-            pass
+        cache.clear()
+        if key and tp:
+            cache.update(key=key, tp=tp)
+    sel = tp.GetSelection() if tp else None
+    if not sel:
+        return None
+    caret = sel[0]
+    START, END = auto.TextPatternRangeEndpoint.Start, auto.TextPatternRangeEndpoint.End
+    b = caret.Clone()
+    b.MoveEndpointByRange(END, caret, START)
+    b.MoveEndpointByUnit(START, auto.TextUnit.Character, -chars)
+    text = b.GetText(chars * 4).replace("\r\n", "\n").replace("\r", "\n")
+    point = None
+    try:
+        rects = b.GetBoundingRectangles()
+        if rects:
+            r = rects[-1]                          # the line the caret is on
+            point = (r.right, r.top, r.bottom)
+    except Exception:
+        pass
     return text, point, False
+
+
+class UiaReader:
+    """One long-lived UI Automation thread for word prediction. Setting UIA up costs time, so it's
+    done once instead of on every pause; only the newest request is worked on, and a frozen app can
+    only make a read time out (then the typed keys are used)."""
+
+    def __init__(self):
+        self.jobs = queue.Queue()
+        threading.Thread(target=self.loop, daemon=True).start()
+
+    def loop(self):
+        import uiautomation as auto
+        cache = {}
+        with auto.UIAutomationInitializerInThread():
+            while True:
+                job = self.jobs.get()
+                while not self.jobs.empty():           # skip requests you've typed past
+                    job[2].set()
+                    job = self.jobs.get()
+                chars, box, done = job
+                try:
+                    box[0] = _read_before(auto, chars, cache)
+                except Exception:
+                    cache.clear()
+                    box[0] = None
+                done.set()
+
+    def read(self, chars=300, timeout=0.25):
+        box, done = [None], threading.Event()
+        self.jobs.put((chars, box, done))
+        done.wait(timeout)
+        return box[0]
 
 
 def trim_context(before, selected, after, chars=CONTEXT_CHARS):
@@ -1258,6 +1307,8 @@ class Predictions:
         self.fast_predictor = None
         self.sel, self.rows, self.shown_gen, self.ghost = 0, [], -1, None
         self.ghost_point, self.ghost_bg = None, (None, None)
+        self.uia = UiaReader()
+        self.epoch, self.last_exact = 0, None       # last exact caret spot in this window (for pass 1)
         self.user_model = None
         self.last_key_at = 0.0
         self.web = None
@@ -1461,6 +1512,9 @@ class Predictions:
         elif key == K.space and not (ctrl or alt or win):
             self.buf += " "
             self.learn_last()
+            self.buf = self.buf[-self.BUF_MAX:]
+            self.schedule(0.02)
+            return
         elif key == K.enter and not (ctrl or alt):
             self.buf += "\n"
             self.learn_last()
@@ -1544,17 +1598,20 @@ class Predictions:
 
     def reset(self):
         self.buf, self.last_fix = "", None
+        self.epoch += 1                        # the caret may have moved: forget its last position
         self.gen += 1
         if self.timer:
             self.timer.cancel()
         self.hide()
 
-    def schedule(self):
+    def schedule(self, delay=None):
+        """Predict after a pause: short after a space or a picked word (the next word is wanted now),
+        a little longer mid-word so the list doesn't flicker while you type fast."""
         self.gen += 1
         self.hide()
         if self.timer:
             self.timer.cancel()
-        self.timer = threading.Timer(PREDICT_DELAY, self.run, args=(self.gen,))
+        self.timer = threading.Timer(PREDICT_DELAY if delay is None else delay, self.run, args=(self.gen,))
         self.timer.daemon = True
         self.timer.start()
 
@@ -1581,24 +1638,39 @@ class Predictions:
             if web and web.get("password"):
                 return why("skipped, password box (browser)")
 
-            # pass 1: instant
-            first = None
-            fast_text = (web.get("text") or "") if web else self.buf
-            fast_point = web_point(web, hwnd) if web else caret_rect()
-            if self.fast_predictor and worth_predicting(fast_text) and fast_point:
-                words = self.fast_predictor.predict(fast_text, PREDICT_COUNT)
-                if words and gen == self.gen:
-                    first = (words, fast_point)
-                    self.app.q.put(lambda w=words, pt=fast_point: self.show(w, pt, gen, exact=True))
-            if web and self.predictor is self.fast_predictor:
-                return                         # nothing better to wait for
+            pushed = []
 
-            # pass 2: full
+            def push(words, point, exact):
+                """Queue a list for the screen unless it's what we already showed."""
+                if not words or gen != self.gen or (pushed and pushed[-1] == (words, point, exact)):
+                    return
+                pushed.append((words, point, exact))
+                self.app.q.put(lambda w=words, pt=point, ex=exact: self.show(w, pt, gen, exact=ex))
+
+            def remember(point):
+                self.last_exact = (hwnd, self.epoch, point)
+
+            def recent():
+                """Where the caret last was in this window, if nothing moved it since (approximate)."""
+                le = self.last_exact
+                return le[2] if le and le[0] == hwnd and le[1] == self.epoch else None
+
+            # pass 1: instant (typed keys / browser helper + word lists)
+            fast_text = (web.get("text") or "") if web else self.buf
+            point1 = web_point(web, hwnd) if web else caret_rect()
+            exact1 = bool(point1)
+            if exact1:
+                remember(point1)
+            point1 = point1 or recent()
+            if self.fast_predictor and worth_predicting(fast_text) and point1:
+                push(self.fast_predictor.predict(fast_text, PREDICT_COUNT), point1, exact1)
+
+            # pass 2: the real text (UI Automation) + word lists, shown at once
             uia = None
             if web:
                 source, text = "web", web.get("text") or ""
             else:
-                uia = run_with_timeout(lambda: read_before_caret(300), 0.3)
+                uia = self.uia.read(300, 0.25)
                 if uia and uia[2]:
                     self.app.q.put(lambda: gen == self.gen and self.hide())
                     return why("skipped, password box")
@@ -1610,28 +1682,33 @@ class Predictions:
                 return why(f"no text before caret in {proc} (uia={'yes' if uia else 'no'})")
             if not worth_predicting(text):
                 return                         # start of a sentence: wait for the first letter
+            where, point = "uia", (uia[1] if uia else None)
+            if web:
+                point, where = (point1 if exact1 else None), "web"
+            if not point:
+                point, where = caret_rect(), "caret"
+            exact = bool(point)
+            if exact:
+                remember(point)
+            else:
+                point, where = recent(), "last caret spot"
+            if not point:
+                mx, my = pyautogui.position()
+                point, where = (mx, my, my + 16), "mouse"
+            if self.fast_predictor and (source != "web" or not pushed):
+                push(self.fast_predictor.predict(text, PREDICT_COUNT), point, exact)
+
+            # pass 3: the AI model, replacing the list if it found something different
+            if self.predictor is self.fast_predictor:
+                return why(f"{len(pushed[-1][0]) if pushed else 0} words by ngram from {source} in {proc}, at {where}")
             t0 = time.time()
             words = self.predictor.predict(text, PREDICT_COUNT, cancelled=lambda: gen != self.gen)
             ms = (time.time() - t0) * 1000
             if gen != self.gen:
                 return
-            if not words:
-                return why(f"no suggestions ({source}, {len(text)} chars, {ms:.0f}ms)")
-            where, point = "uia", (uia[1] if uia else None)
-            if web:
-                point, where = fast_point, "web"
-            if not point:
-                point, where = caret_rect(), "caret"
-            exact = bool(point)
-            if not point:
-                mx, my = pyautogui.position()
-                point, where = (mx, my, my + 16), "mouse"
             engine = getattr(self.predictor, "last", "ngram")
-            why(f"{len(words)} words by {engine} in {ms:.0f}ms from {source} in {proc}, at {where}"
-                + (" (updated)" if first else ""))
-            if first and first[0] == words and first[1] == point:
-                return                         # pass 1 already showed exactly this
-            self.app.q.put(lambda w=words, pt=point, ex=exact: self.show(w, pt, gen, exact=ex))
+            why(f"{len(words)} words by {engine} in {ms:.0f}ms from {source} in {proc}, at {where}")
+            push(words, point, exact)
         except Exception:
             log("predict failed:\n" + traceback.format_exc())
 
@@ -1656,7 +1733,7 @@ class Predictions:
             return
         self.buf = (self.buf + insert)[-self.BUF_MAX:]
         self.learn_last()
-        self.schedule()                        # offer the word after it straight away
+        self.schedule(0)                       # offer the word after it straight away
 
     # --- the strip (UI thread only)
     def build_strip(self):
