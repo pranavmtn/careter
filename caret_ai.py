@@ -1900,7 +1900,7 @@ class App:
         print(f"Careter running ({MODEL}). Press {HOTKEY} anywhere. Ctrl+C here to quit.")
         if self.predictions:
             print(f"Word prediction: {'on' if PREDICT else 'off'} ({PREDICT_HOTKEY} toggles). "
-                  "Keys 1-5 (or Tab for the first) pick a word.")
+                  "Tab takes the grey text, up/down choose, 1-5 pick directly.")
 
     def pump(self):
         while not self.q.empty():
