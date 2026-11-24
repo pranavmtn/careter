@@ -166,7 +166,7 @@
       const w = document.createElement("div");
       w.className = "w"; w.dataset.i = i;
       const n = document.createElement("b"); n.textContent = String(i + 1);
-      const s = document.createElement("span"); s.textContent = word;
+      const s = document.createElement("span"); s.textContent = word + (words[i][1].startsWith("\x08") ? "  ✎" : "");
       w.append(n, s); box.appendChild(w);
     });
     shown = words; sel = 0;
@@ -197,7 +197,7 @@
     }
     const g = ghostFor, item = shown[sel];
     const after = g && g.el ? textAfter(g.el) : "x";
-    if (!g || !item || (after && !/^\s*(\n|$)/.test(after))) { ghost.style.display = "none"; return; }
+    if (!g || !item || item[1].startsWith("\x08") || (after && !/^\s*(\n|$)/.test(after))) { ghost.style.display = "none"; return; }
     const cs = getComputedStyle(g.el);
     ghost.textContent = item[1].replace(/ $/, "");
     ghost.style.font = cs.font;
@@ -252,9 +252,11 @@
     const item = shown[i];
     if (!el || !item) return;
     const before = textBefore(el) || "";
+    const fix = item[1].length - item[1].replace(/^\x08+/, "").length;   // a fix replaces the typed letters
+    const text = item[1].slice(fix);
     hide();
-    replaceBefore(el, 0, item[1]);
-    learnFrom(before + item[1]);
+    replaceBefore(el, fix, text);
+    learnFrom(before.slice(0, before.length - fix) + text);
     schedule(0);                                     // suggest the word after it straight away
   }
 

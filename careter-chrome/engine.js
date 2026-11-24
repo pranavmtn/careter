@@ -54,9 +54,17 @@ function shape(w, partial, start) {
 class NGram {
   constructor(model) {
     const known = new Set(model.words);
-    this.words = model.words.concat([...BOOST].filter((w) => !known.has(w)).sort());   // jira, hotfix...
+    this.extra = new Set([...BOOST].filter((w) => !known.has(w)));   // jira, hotfix...: never "fixed to"
+    this.words = model.words.concat([...this.extra].sort());
     this.bi = model.bi;                               // { prevWord: [index, ...] }
     this.rank = new Map(this.words.map((w, i) => [w, i]));
+    this.pre = new Map();                             // prefix (3-8 letters) -> most common words with it
+    for (const w of this.words.slice(0, 30000)) for (let n = 3; n <= Math.min(w.length, 8); n++) {
+      const k = w.slice(0, n);
+      if (!this.pre.has(k)) this.pre.set(k, []);
+      const lst = this.pre.get(k);
+      if (lst.length < 6) lst.push(w);
+    }
     this.by1 = new Map(); this.by2 = new Map();
     for (const w of this.words) {
       if (!this.by1.has(w[0])) this.by1.set(w[0], []);
@@ -94,7 +102,41 @@ class NGram {
         for (const w of pool) { add(w); if (picks.length >= n) break; }
       }
     }
-    return picks.slice(0, n).map((w) => shape(w, ctx.partial, ctx.start));
+    const out = picks.slice(0, n).map((w) => shape(w, ctx.partial, ctx.start));
+    return this.withFixes(out, ctx.partial, ctx.start, n);
+  }
+  // Words you probably meant while typing a misspelled one ("craet" -> created, create).
+  fixes(partial, limit = 3) {
+    const p = partial.toLowerCase();
+    if (p.length < 3 || !/^[a-z]+$/.test(p) || BOOST.has(p) || (this.rank.has(p) && this.rank.get(p) < 20000)) return [];
+    const found = new Map();
+    for (const e of edits1(p)) {
+      if (e.length < 3 || e === p || e === p.slice(0, -1) || (e[0] !== p[0] && e.slice(0, 2) !== p[1] + p[0])) continue;
+      for (const w of this.pre.get(e.slice(0, 8)) || [])
+        if (w.startsWith(e) && !NAMES.has(w) && !w.startsWith(p)) {
+          const r = this.rank.has(w) ? this.rank.get(w) : 1e9;
+          if (!found.has(w) || found.get(w) > r) found.set(w, r);
+        }
+    }
+    return [...found.keys()].sort((a, b) => found.get(a) - found.get(b)).slice(0, limit);
+  }
+  // Fixes go first when far more common than anything starting with what was typed, else last.
+  // A fix replaces what was typed, so its text starts with a backspace (\x08) per typed letter.
+  withFixes(out, partial, start, n) {
+    const rk = (w) => (this.rank.has(w) ? this.rank.get(w) : 1e9);
+    const bestTyped = Math.min(1e9, ...out.map((x) => rk(x[0].toLowerCase())));
+    if (bestTyped < 5000) return out;
+    const fixes = this.fixes(partial);
+    if (!fixes.length) return out;
+    const items = fixes.map((w) => {
+      const shown = partial[0] && partial[0] !== partial[0].toLowerCase() ? w[0].toUpperCase() + w.slice(1) : w;
+      return [shown, "\x08".repeat(partial.length) + shown + " "];
+    });
+    const merged = rk(fixes[0]) * 4 < bestTyped ? items.concat(out)
+      : out.slice(0, out.length ? Math.max(n - items.length, n - 1) : 0).concat(items);
+    const seen = new Set(), result = [];
+    for (const it of merged) if (!seen.has(it[0].toLowerCase())) { seen.add(it[0].toLowerCase()); result.push(it); }
+    return result.slice(0, n);
   }
 }
 
@@ -207,7 +249,7 @@ class Speller {
     const r = this.ng.rank.get(word);
     if (r !== undefined && r < this.COMMON) return null;
     const first = (c) => c[0] === word[0] || c.slice(0, 2) === word[1] + word[0];
-    const ok = (c, top) => { const rc = this.ng.rank.get(c); return rc !== undefined && rc < (r !== undefined ? this.RARE_TO : top) && first(c); };
+    const ok = (c, top) => { const rc = this.ng.rank.get(c); return rc !== undefined && rc < (r !== undefined ? this.RARE_TO : top) && first(c) && !this.ng.extra.has(c); };
     const follows = new Set(prev ? this.ng.after(prev) : []);
     const best = (cs) => cs.sort((a, b) => (follows.has(a) ? 0 : 1) - (follows.has(b) ? 0 : 1) || this.ng.rank.get(a) - this.ng.rank.get(b))[0];
     const e1 = edits1(word);

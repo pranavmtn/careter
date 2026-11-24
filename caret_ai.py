@@ -1759,10 +1759,14 @@ class Predictions:
 
     def accept(self, choice):
         word, insert = choice
+        fix = len(insert) - len(insert.lstrip("\b"))     # a fix replaces the typed letters first
+        insert = insert[fix:]
         self.gen += 1
         self.hide()
         time.sleep(0.03)
         try:
+            if fix:
+                pyautogui.press("backspace", presses=fix, _pause=False)
             if insert.isascii():
                 pyautogui.write(insert, interval=0.004)
             else:
@@ -1770,7 +1774,7 @@ class Predictions:
         except Exception:
             log("predict: insert failed:\n" + traceback.format_exc())
             return
-        self.buf = (self.buf + insert)[-self.BUF_MAX:]
+        self.buf = ((self.buf[:-fix] if fix else self.buf) + insert)[-self.BUF_MAX:]
         self.learn_last()
         self.schedule(0)                       # offer the word after it straight away
 
@@ -1862,6 +1866,9 @@ class Predictions:
         if not self.ghost or not self.shown:
             return
         text = self.shown[self.sel][1].rstrip(" ")
+        if text.startswith("\b"):                     # a fix replaces the word: nothing to add after it
+            self.w.ShowWindow(self.ghost_hwnd, 0)
+            return
         x, top, bottom = point
         if self.ghost_bg[0] == point:                  # same spot (arrow keys, better words arrived):
             bg = self.ghost_bg[1]                      # don't re-read the screen, our grey text is on it
@@ -1998,7 +2005,7 @@ class Predictions:
     def _show(self, words, point, gen, exact):
         self.sel, self.shown_gen = 0, gen
         self.shown, self.visible = list(words), True
-        items = [(w, str(i + 1),
+        items = [(w + ("  ✎" if ins.startswith("\b") else ""), str(i + 1),     # ✎ = fixes what you typed
                   lambda i=i: threading.Thread(target=self.accept, args=(self.shown[i],), daemon=True).start())
                  for i, (w, ins) in enumerate(words)]
         self.fill(items)

@@ -325,8 +325,16 @@ class NGramPredictor:
                 pickle.dump((self.words, self.bi), f, protocol=pickle.HIGHEST_PROTOCOL)
         self.lock = threading.Lock()
         known = set(self.words)
-        self.words = self.words + sorted(w for w in BOOST if w not in known)   # jira, hotfix, llm...
+        self.extra = {w for w in BOOST if w not in known}  # jira, hotfix, llm...: offered, never "fixed to"
+        self.words = self.words + sorted(self.extra)
         self.rank = {w: i for i, w in enumerate(self.words)}
+        # for fixes while typing: prefix (3-8 letters) -> the most common words starting with it
+        self.pre = {}
+        for w in self.words[:30_000]:
+            for n in range(3, min(len(w), 8) + 1):
+                lst = self.pre.setdefault(w[:n], [])
+                if len(lst) < 6:
+                    lst.append(w)
         self.by1, self.by2 = {}, {}                     # first letter(s) -> words, most common first
         for w in self.words:
             self.by1.setdefault(w[0], []).append(w)
@@ -405,8 +413,49 @@ class NGramPredictor:
                     add(w)
                     if len(picks) >= n:
                         break
-        return [shape(w, partial, start) for w in picks[:n]]
+        out = [shape(w, partial, start) for w in picks[:n]]
+        return self.with_fixes(out, partial, start, n)
 
+    def fixes(self, partial, limit=3):
+        """Words you probably meant while typing a misspelled one: one edit away from what's typed so
+        far ("craet" -> created, create). Common words only, keeps the first letter."""
+        p = partial.lower()
+        if len(p) < 3 or not p.isalpha() or p in BOOST or self.rank.get(p, 10**9) < 20_000:
+            return []                                   # short, or already a normal word ("the")
+        found = {}
+        for e in edits1(p):
+            if len(e) < 3 or e == p or e == p[:-1] or (e[0] != p[0] and e[:2] != p[1::-1]):
+                continue                                # (dropping the last letter isn't a fix: crated -> crate)
+            for w in self.pre.get(e[:8], ()):
+                if w.startswith(e) and w not in NAMES and not w.startswith(p):
+                    found[w] = min(found.get(w, 10**9), self.rank.get(w, 10**9))
+        return sorted(found, key=found.get)[:limit]
+
+    def with_fixes(self, out, partial, start, n):
+        """Add fixes to the list. They go first when the best fix is far more common than anything
+        starting with what was typed ("crat": create before crate), otherwise last (at least one slot).
+        A fix replaces what was typed, so its text starts with a backspace (\b) per typed letter."""
+        best_typed = min((self.rank.get(x[0].lower(), 10**9) for x in out), default=10**9)
+        if best_typed < 5_000:
+            return out                                  # what's typed starts a common word: no fixes needed
+        fixes = self.fixes(partial)
+        if not fixes:
+            return out
+        items = []
+        for w in fixes:
+            shown = w[:1].upper() + w[1:] if (partial[:1].isupper() or (start and not partial)) else w
+            items.append((shown, "\b" * len(partial) + shown + " "))
+        if self.rank.get(fixes[0], 10**9) * 4 < best_typed:
+            merged = items + out
+        else:
+            keep = max(n - len(items), n - 1) if out else 0
+            merged = out[:keep] + items
+        seen, result = set(), []
+        for item in merged:
+            if item[0].lower() not in seen:
+                seen.add(item[0].lower())
+                result.append(item)
+        return result[:n]
 
 class HybridPredictor:
     """The LLM when it answers in time, otherwise the instant word-count engine."""
@@ -528,9 +577,12 @@ class Speller:
             return None                                 # a normal word
         first = lambda c: c[0] == word[0] or c[:2] == word[1::-1]   # typos keep the first letter (or swap the first two)
 
+        extra = getattr(self.ng, "extra", ())
+
         def ok(c, top):
             rc = self.rank.get(c)
-            return rc is not None and rc < (self.RARE_TO if r is not None else top) and first(c)
+            return (rc is not None and rc < (self.RARE_TO if r is not None else top) and first(c)
+                    and c not in extra)
         follows = set(self.ng.bi.get(prev, [])) if prev else set()
         best = lambda cands: min(cands, key=lambda c: (c not in follows, self.rank[c]))  # context, then common
 
