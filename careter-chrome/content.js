@@ -144,9 +144,8 @@
     box = root.querySelector(".pill");
     box.addEventListener("mousedown", (e) => {        // keep focus in the text box
       e.preventDefault();
-      if (e.target.closest(".grip")) { startDrag(e); return; }
-      const w = e.target.closest(".w");
-      if (w) accept(+w.dataset.i);
+      const w = e.target.closest(".w");                // a click picks; press and move drags
+      startDrag(e, w ? () => accept(+w.dataset.i) : null);
     });
     box.addEventListener("dblclick", (e) => {         // double-click the grip: back under the cursor
       if (!e.target.closest(".grip")) return;
@@ -173,18 +172,22 @@
     strip.style.left = `${left}px`;
   }
 
-  function startDrag(e) {
-    dragging = { x: e.clientX, y: e.clientY, left: parseFloat(strip.style.left), top: parseFloat(strip.style.top) };
+  function startDrag(e, pick) {
+    dragging = { x: e.clientX, y: e.clientY, left: parseFloat(strip.style.left), top: parseFloat(strip.style.top), moved: false };
     const move = (ev) => {
+      if (!dragging.moved && Math.abs(ev.clientX - dragging.x) + Math.abs(ev.clientY - dragging.y) < 5) return;
+      dragging.moved = true;
       strip.style.left = `${dragging.left + ev.clientX - dragging.x}px`;
       strip.style.top = `${dragging.top + ev.clientY - dragging.y}px`;
     };
     const up = () => {
       document.removeEventListener("mousemove", move, true);
       document.removeEventListener("mouseup", up, true);
+      const moved = dragging.moved;
+      dragging = null;
+      if (!moved) { if (pick) pick(); return; }       // released without moving: a click
       if (lastDefault) dragOffset = { dx: parseFloat(strip.style.left) - lastDefault.left,
                                       dy: parseFloat(strip.style.top) - lastDefault.top };
-      dragging = null;
     };
     document.addEventListener("mousemove", move, true);
     document.addEventListener("mouseup", up, true);

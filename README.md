@@ -31,7 +31,7 @@ While you type anywhere, Careter suggests the next word, or the rest of the word
 
 - The top suggestion appears as **grey text right after the cursor**; **Tab** or **Enter** inserts it. Below the line, a vertical list shows up to **5 suggestions**: **↑ / ↓** move the highlight (the grey text follows), **Tab** or **Enter** inserts the highlighted one, **1–5** insert one directly. After you accept, it suggests the word after that.
 - Fast: word-list suggestions show about 0.1 s after you pause; if the LLM finds better ones, the list updates in place. The grey text is skipped when there's already text after the cursor on that line, or when the app doesn't report where the cursor is.
-- Drag the list by its **• • •** grip if it covers something; it stays there (relative to the cursor) in that window, and a double-click on the grip puts it back. **Enter** picking a suggestion can be switched off in Settings.
+- **Mouse:** click a suggestion to insert it; press and drag the list (anywhere, or by its **• • •** grip) if it covers something; it stays there (relative to the cursor) in that window, and a double-click on the grip puts it back. **Enter** picking a suggestion can be switched off in Settings.
 - Keep typing or press **Esc** and the strip goes away. Number keys, arrows, Tab and Enter behave normally whenever the list isn't showing (press Esc first for a plain new line).
 - **Fixes while you type:** if the word you're typing looks misspelled, the list also offers what you probably meant, marked ✎ ("craet" → *created*, "becuas" → *because*). Picking one replaces what you typed.
 - **Auto-correct:** when you press space after a typo, it's fixed: famous typos ("teh" → "the", "adn" → "and"), one-letter mistakes ("recevie" → "receive"), and two-letter mistakes in words of 7+ letters ("definatly" → "definitely"), and up to three in words of 9+ letters ("aknoldgement" → "acknowledgement"). Fixes keep the first letter and aim only at common words. Press **Backspace** right after to put back what you typed; that word is then never corrected again (saved, encrypted, in `ngrams/user_words.dat`). It only touches lowercase words of 3+ letters that follow another word, so names, ACRONYMS, numbers, the first word in a box (usernames, passwords) and terminals are left alone. `CARET_AUTOCORRECT=0` turns it off.
@@ -87,7 +87,7 @@ Your data stays on your PC. Suggestions, auto-correct and everything Careter lea
 
 ## Settings
 
-Press **Ctrl+Alt+S** (or open **Careter Settings** from the Start menu, or run `python caret_ai.py --settings`). The window (a light, modern theme) has five tabs:
+Press **Ctrl+Alt+S**, click the **⚙** on the suggestion list (handy if Ctrl+Alt+S is taken on your PC), or open **Careter Settings** from the Start menu ( or run `python caret_ai.py --settings`). The window (a light, modern theme) has five tabs:
 
 - **Home**: status at a glance (suggestions, auto-correct, words learned, assistant model), quick links, and a short why-Careter.
 - **Settings**: word suggestions, grey text, how many suggestions (3–5), auto-correct, suggestions in terminals, the local AI model, the **AI assistant** (model name, API key, and an optional API address for any OpenAI-compatible service such as OpenRouter, Groq or Ollama, with **Save & test**), learning (export / forget), and start-with-Windows. Saved in `settings.json` (AI assistant details in `.env`) and applied immediately; the local-AI switch after **Restart Careter**.

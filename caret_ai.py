@@ -1375,6 +1375,8 @@ class Predictions:
         self.uia = UiaReader()
         self.epoch, self.last_exact = 0, None       # last exact caret spot in this window (for pass 1)
         self.last_seen = None                       # (window, epoch, text) read while you typed
+        self.snaps = {}                             # window -> (keys typed there before a click, when)
+        self.keys_used = ("", None)                 # the typed-keys text the last prediction used
         self.user_model = None
         self.last_key_at = 0.0
         self.web = None
@@ -1565,6 +1567,7 @@ class Predictions:
         self.last_key_at = time.time()
         hwnd = self.user32.GetForegroundWindow()
         if hwnd != self.buf_hwnd:              # another window: what we typed before doesn't apply
+            self.snapshot()
             self.buf, self.buf_hwnd, self.last_fix = "", hwnd, None
             self.buf_proc = foreground_window()[1]
         K = keyboard.Key
@@ -1680,11 +1683,36 @@ class Predictions:
         if not pressed:
             return
         l, t, r, b = self.strip_rect
-        if self.visible and l <= x < r and t <= y < b:
-            return                             # a click on our own strip
+        if self.visible and l - 8 <= x < r + 8 and t - 8 <= y < b + 8:
+            return                             # a click on (or right next to) our own list
         self.reset()                           # the caret probably moved
 
+    def snapshot(self):
+        """Remember what was typed in this window (e.g. "know") before a click or a window switch,
+        so typing on there ("le") can still be completed ("knowledge") in apps that hide their text."""
+        if not hasattr(self, "snaps"):
+            self.snaps, self.keys_used = {}, ("", None)
+        if self.buf_hwnd and self.buf:
+            used, hwnd = self.keys_used
+            text = used if (hwnd == self.buf_hwnd and used.endswith(self.buf)) else self.buf
+            self.snaps[self.buf_hwnd] = (text[-self.BUF_MAX:], time.time())
+
+    def keys_text(self, hwnd):
+        """What we know was typed here: the keys since the last click, or, when that's only part of
+        a word, the keys from before the click + these (if that still makes a word)."""
+        buf = self.buf
+        snap = getattr(self, "snaps", {}).get(hwnd)
+        if (snap and buf and not any(c.isspace() for c in buf) and time.time() - snap[1] < 300
+                and self.fast_predictor):
+            joined = snap[0] + buf
+            if self.fast_predictor.predict(joined, 1):
+                self.keys_used = (joined, hwnd)
+                return joined
+        self.keys_used = (buf, hwnd)
+        return buf
+
     def reset(self):
+        self.snapshot()
         self.buf, self.last_fix = "", None
         self.epoch += 1                        # the caret may have moved: forget its last position
         self.gen += 1
@@ -1744,7 +1772,7 @@ class Predictions:
                 return le[2] if le and le[0] == hwnd and le[1] == self.epoch else None
 
             # pass 1: instant (typed keys / browser helper + word lists)
-            fast_text = (web.get("text") or "") if web else self.buf
+            fast_text = (web.get("text") or "") if web else self.keys_text(hwnd)
             point1 = web_point(web, hwnd) if web else caret_rect()
             exact1 = bool(point1)
             if exact1:
@@ -1763,7 +1791,7 @@ class Predictions:
                     self.app.q.put(lambda: gen == self.gen and self.hide())
                     return why("skipped, password box")
                 source = "uia" if uia and uia[0].strip() else "keys"
-                text = uia[0] if source == "uia" else self.buf
+                text = uia[0] if source == "uia" else self.keys_text(hwnd)
             if gen != self.gen:
                 return
             if source in ("uia", "web") and text.strip():
@@ -1975,18 +2003,22 @@ class Predictions:
         self.w.SetWindowRgn(self.strip_hwnd, rgn, True)              # Windows owns the region now
 
     def fill(self, items):
-        """A vertical list: one row per suggestion (number, word); self.sel is highlighted."""
+        """A vertical list: one row per suggestion (number, word); self.sel is highlighted.
+        Mouse: click a row to pick it; press and move anywhere on the list to drag it out of the way."""
         for child in self.strip_box.winfo_children():
             child.destroy()
         self.rows = []
-        if any(cmd for _, _, cmd in items):          # a grip to drag the list out of the way
-            grip = tk.Label(self.strip_box, text="• • •", bg=STRIP_BG, fg=STRIP_NUM, font=(STRIP_FONT[0], 7),
-                            cursor="fleur", pady=0)
-            grip.pack(side="top", fill="x")
-            grip.bind("<ButtonPress-1>", self.drag_start)
-            grip.bind("<B1-Motion>", self.drag_move)
-            grip.bind("<ButtonRelease-1>", self.drag_end)
-            grip.bind("<Double-Button-1>", self.drag_reset)
+        if any(cmd for _, _, cmd in items):          # top bar: a grip to drag by, and a settings button
+            bar = tk.Frame(self.strip_box, bg=STRIP_BG, cursor="fleur")
+            bar.pack(side="top", fill="x")
+            grip = tk.Label(bar, text="• • •", bg=STRIP_BG, fg=STRIP_NUM, font=(STRIP_FONT[0], 7), cursor="fleur")
+            grip.pack(side="left", expand=True, fill="x")
+            gear = tk.Label(bar, text="⚙", bg=STRIP_BG, fg=STRIP_NUM, font=(STRIP_FONT[0], 9), cursor="hand2", padx=4)
+            gear.pack(side="right")
+            for w in (bar, grip):
+                self.bind_mouse(w, None)
+                w.bind("<Double-Button-1>", self.drag_reset)
+            gear.bind("<ButtonRelease-1>", lambda e: (self.hide(), self.app.q.put(self.app.open_settings)))
         for i, (label, hint, cmd) in enumerate(items):
             row = tk.Frame(self.strip_box, bg=STRIP_BG, cursor="hand2" if cmd else "", padx=6, pady=1)
             row.pack(side="top", fill="x")
@@ -2000,27 +2032,41 @@ class Predictions:
                 w.pack(side="left")
             if cmd:
                 for w in [row] + parts:
-                    w.bind("<Button-1>", lambda e, c=cmd: c())
+                    self.bind_mouse(w, cmd)
             self.rows.append([row] + parts)
         self.paint_selection()
 
+    def bind_mouse(self, widget, pick):
+        widget.bind("<ButtonPress-1>", self.drag_start)
+        widget.bind("<B1-Motion>", self.drag_move)
+        widget.bind("<ButtonRelease-1>", lambda e, p=pick: self.drag_end(e, p))
+
     # --- dragging the list (the spot is kept, relative to the cursor, while you type in this window)
     def drag_start(self, e):
-        self.dragging = (e.x_root, e.y_root, self.strip.winfo_x(), self.strip.winfo_y())
+        self.dragging = [e.x_root, e.y_root, self.strip.winfo_x(), self.strip.winfo_y(), False]
 
     def drag_move(self, e):
-        if not getattr(self, "dragging", None):
+        d = getattr(self, "dragging", None)
+        if not d:
             return
-        sx, sy, wx, wy = self.dragging
+        sx, sy, wx, wy, moved = d
+        if not moved and abs(e.x_root - sx) + abs(e.y_root - sy) < 5:
+            return                                   # a click, not a drag (yet)
+        d[4] = True
         x, y = wx + e.x_root - sx, wy + e.y_root - sy
         self.strip.geometry(f"+{x}+{y}")
         w_, h = self.strip.winfo_width(), self.strip.winfo_height()
         self.strip_rect = (x, y, x + w_, y + h)
 
-    def drag_end(self, e):
-        if not getattr(self, "dragging", None):
-            return
+    def drag_end(self, e, pick=None):
+        d = getattr(self, "dragging", None)
         self.dragging = None
+        if not d:
+            return
+        if not d[4]:                                 # released without moving: a click
+            if pick:
+                pick()
+            return
         dx = self.strip.winfo_x() - self.strip_default[0]
         dy = self.strip.winfo_y() - self.strip_default[1]
         self.drag_offset = (self.buf_hwnd, dx, dy)
@@ -2151,7 +2197,8 @@ Careter runs quietly in the background. You don't open it: just type anywhere (N
 • ↑ / ↓: choose another suggestion (the grey text follows).
 • 1 – 5: insert that suggestion directly. You can also click it.
 • Esc, or just keep typing: hide the list.
-• In the way? Drag the list by its • • • grip. It stays at that spot while you type in that window; double-click the grip to put it back.
+• Mouse: click a suggestion to insert it. In the way? Press and drag the list anywhere (or by its • • • grip). It stays at that spot while you type in that window; double-click the grip to put it back.
+• The ⚙ on the list opens these settings (handy if Ctrl+Alt+S is taken on your PC).
 • Don't want Enter to pick suggestions? Settings → Typing → switch off "Enter also inserts the suggestion".
 • At the start of a sentence, type the first letter and suggestions appear.
 • While the list is showing, ↑ ↓, Tab, Enter and 1–5 belong to Careter; the rest of the time they work as usual (press Esc first if you want a new line).
@@ -2324,7 +2371,7 @@ SHORTCUTS = [
     ("Backspace", "right after an auto-correct: undo it"),
     ("Ctrl  Ctrl", "double-tap: suggestions on / off"),
     ("Ctrl+Alt+Space", "AI assistant at your cursor"),
-    ("Ctrl+Alt+S", "settings, help and your AI key"),
+    ("Ctrl+Alt+S  or  ⚙", "settings, help and your AI key (⚙ is on the list)"),
 ]
 
 
