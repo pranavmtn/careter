@@ -76,7 +76,12 @@ For the Chrome Web Store you'd also add icons, put a prebuilt `model.json` in th
 
 ## Settings
 
-Press **Ctrl+Alt+S** (or open **Careter Settings** from the Start menu, or run `python caret_ai.py --settings`) for one window with every switch: word suggestions, grey text, how many suggestions (3–5), auto-correct, suggestions in terminals, the local AI model, learning (with export / forget), and start-with-Windows. Choices are saved in `settings.json` and apply immediately (the AI model switch after **Restart Careter**). The window also shows the live log (only word prediction by default, never what you typed), with **Copy** to paste it when reporting a problem.
+Press **Ctrl+Alt+S** (or open **Careter Settings** from the Start menu, or run `python caret_ai.py --settings`). The window has four tabs:
+
+- **Settings**: word suggestions, grey text, how many suggestions (3–5), auto-correct, suggestions in terminals, the local AI model, the **AI assistant** (model name, API key, and an optional API address for any OpenAI-compatible service such as OpenRouter, Groq or Ollama, with **Save & test**), learning (export / forget), and start-with-Windows. Saved in `settings.json` (AI assistant details in `.env`) and applied immediately; the local-AI switch after **Restart Careter**.
+- **How to use**: a guide for new users: every key, auto-correct, turning it off, the assistant, learning.
+- **Install & update**: install, update (stop → pull → restart), the browser extensions, handy commands, uninstall. Click a command to copy it.
+- **Log**: what Careter is doing, live (never what you typed), with **Copy** to paste it when reporting a problem.
 
 ## Always running (Windows)
 

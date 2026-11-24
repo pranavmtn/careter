@@ -1994,26 +1994,200 @@ class Predictions:
             self.app.q.put(_hide)
 
 
+HELP_USE = """# Getting started
+Careter runs quietly in the background. You don't open it: just type anywhere (Notepad, Word, Gmail, WhatsApp Web, chat apps…) and it helps you type.
+
+## Word suggestions
+• Type a few words and pause for a moment. A small dark list appears under the line with up to 5 suggestions.
+• The highlighted suggestion also appears as grey text right after your cursor.
+• Tab: insert the grey text. Then it suggests the next word, so you can keep pressing Tab.
+• ↑ / ↓: choose another suggestion (the grey text follows).
+• 1 – 5: insert that suggestion directly. You can also click it.
+• Esc, or just keep typing: hide the list.
+• At the start of a sentence, type the first letter and suggestions appear.
+• While the list is showing, ↑ ↓, Tab and 1–5 belong to Careter; the rest of the time they work as usual.
+• No grey text? Some apps don't tell Windows where the cursor is. The list still appears (at the mouse), just without grey text.
+
+## Auto-correct
+• When you press space after a typo, it's fixed: "teh" → "the", "recieve" → "receive", "definatly" → "definitely".
+• Press Backspace right after to put your word back. Careter remembers it and never changes it again.
+• Names, CAPITALS, numbers and the first word in a box are never changed.
+
+## Turn it off for a moment
+• Double-tap Ctrl (or press Ctrl+Alt+P) to switch suggestions and auto-correct off, for example to type numbers or Manglish. Do it again to switch them back on. A small label shows which.
+
+## The AI assistant
+• Press Ctrl+Alt+Space anywhere to open Careter's assistant at your cursor. It reads what's around the cursor, answers, and can take actions after asking you.
+• It needs an AI model and its API key: set them in the Settings tab → AI assistant, then click Save & test.
+• Only the assistant uses that key; word suggestions run on this PC and never send anything anywhere.
+
+## It learns from you
+• Words and phrases you use often move to the top of the list. Personal names are never suggested or learned.
+• What it learns stays on this PC, encrypted. Settings tab → Learning: export it or forget everything.
+
+## Keys at a glance
+• Tab: insert the grey text
+• ↑ ↓: choose   ·   1–5: pick   ·   Esc: hide the list
+• Backspace right after a correction: undo it
+• Double-tap Ctrl or Ctrl+Alt+P: suggestions on / off
+• Ctrl+Alt+Space: AI assistant
+• Ctrl+Alt+S: this window
+
+## Something not working?
+• Open the Log tab, try again, click Copy and send the log to whoever helps you. It never contains what you typed.
+"""
+
+HELP_INSTALL = r"""# Install on Windows
+1. Open PowerShell: press the Windows key, type PowerShell, press Enter.
+2. Paste this line and press Enter:
+$ irm https://raw.githubusercontent.com/pranavmtn/careter/main/install.ps1 | iex
+3. When it asks, paste your OpenAI API key (only the Ctrl+Alt+Space assistant uses it; you can change it later in Settings → AI assistant).
+That's it: Careter starts now and every time you sign in. Press Ctrl+Alt+S to see this window.
+
+## Update to the newest version
+Always stop Careter first, then update, then start it again. Run these one by one in PowerShell:
+$ cd "{dir}"
+$ .\.venv\Scripts\python caret_ai.py --stop
+$ git pull
+$ .\.venv\Scripts\python caret_ai.py --autostart on
+
+## Browser helper (Chrome, Edge, Brave)
+Puts the suggestions exactly under your text on websites.
+1. In Chrome open chrome://extensions (in Edge: edge://extensions).
+2. Switch on Developer mode (top right).
+3. Click Load unpacked and choose this folder:
+$ {dir}\chrome-extension
+4. Reload the tabs you had open.
+
+## Careter for Chrome (on computers without Careter)
+Suggestions, auto-correct and learning inside the browser only, no install needed. Same steps as above, but choose this folder instead:
+$ {dir}\careter-chrome
+On a PC where Careter is running, this extension stays quiet and Careter does the work.
+
+## Handy commands
+Run them in PowerShell after cd "{dir}":
+$ .\.venv\Scripts\python caret_ai.py --stop
+• closes Careter (it comes back within 5 minutes if start-with-Windows is on)
+$ .\.venv\Scripts\python caret_ai.py --autostart on
+• start with Windows and keep running (also starts it now); use off to stop that
+$ .\.venv\Scripts\python caret_ai.py
+• run it in the PowerShell window to watch its messages (stop it first)
+$ .\.venv\Scripts\python caret_ai.py --settings
+• open this window
+
+## Uninstall
+$ .\.venv\Scripts\python caret_ai.py --autostart off
+$ .\.venv\Scripts\python caret_ai.py --stop
+Then delete the folder {dir} and remove the Careter extensions in chrome://extensions.
+"""
+
+
+def set_env_values(values):
+    """Write KEY=VALUE pairs into the .env next to this script (a None value removes the key)."""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+    lines = []
+    if os.path.exists(path):
+        with open(path, encoding="utf-8") as f:
+            lines = f.read().splitlines()
+    done = set()
+    out = []
+    for line in lines:
+        k = line.split("=", 1)[0].strip() if "=" in line and not line.lstrip().startswith("#") else None
+        if k in values:
+            done.add(k)
+            if values[k] is not None:
+                out.append(f"{k}={values[k]}")
+            continue
+        out.append(line)
+    out += [f"{k}={v}" for k, v in values.items() if k not in done and v is not None]
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("\n".join(out) + "\n")
+    for k, v in values.items():
+        if v is None:
+            os.environ.pop(k, None)
+        else:
+            os.environ[k] = v
+
+
 class SettingsWindow:
-    """Careter Settings: every switch for word prediction in one small window (Ctrl+Alt+S)."""
+    """Careter Settings (Ctrl+Alt+S): tabs for the switches, a how-to for new users, install and update
+    steps, and the live log."""
+
+    TABS = ("Settings", "How to use", "Install & update", "Log")
 
     def __init__(self, app):
         self.app = app
         win = self.win = tk.Toplevel(app.root)
         win.title("Careter Settings")
-        win.configure(bg=BG, padx=18, pady=14)
-        win.resizable(False, False)
+        win.configure(bg=BG, padx=16, pady=12)
         win.attributes("-topmost", True)
-        pred = app.predictions
+        win.minsize(680, 600)
         self.vars = {}
+        here = os.path.dirname(os.path.abspath(__file__))
+
+        tk.Label(win, text="Careter", bg=BG, fg=FG, font=(FONT[0], FONT[1] + 5, "bold"),
+                 anchor="w").pack(fill="x")
+        bar = tk.Frame(win, bg=BG)
+        bar.pack(fill="x", pady=(8, 0))
+        self.tab_buttons, self.pages = {}, {}
+        for name in self.TABS:
+            b = tk.Label(bar, text=name, bg=FIELD, fg=MUTED, font=FONT_B, padx=14, pady=6, cursor="hand2")
+            b.pack(side="left", padx=(0, 4))
+            b.bind("<Button-1>", lambda e, n=name: self.show_tab(n))
+            self.tab_buttons[name] = b
+        tk.Frame(win, bg=ACCENT, height=2).pack(fill="x")
+        body = tk.Frame(win, bg=BG)
+        body.pack(fill="both", expand=True, pady=(10, 0))
+        for name in self.TABS:
+            self.pages[name] = tk.Frame(body, bg=BG)
+
+        # the status line and buttons are created first so every tab can use them
+        self.bottom = tk.Frame(win, bg=BG)
+        self.status = tk.Label(self.bottom, text="", bg=BG, fg=MUTED, font=(FONT[0], FONT[1] - 1), anchor="w")
+        self.status.pack(fill="x", pady=(8, 0))
+        row = tk.Frame(self.bottom, bg=BG)
+        row.pack(fill="x", pady=(6, 0))
+        self.button(row, "Close", self.close).pack(side="right")
+        self.restart_btn = self.button(row, "Restart Careter", self.restart)
+        self.bottom.pack(fill="x", side="bottom")
+
+        self.build_settings(self.pages["Settings"])
+        self.build_guide(self.pages["How to use"], HELP_USE)
+        self.build_guide(self.pages["Install & update"], HELP_INSTALL.replace("{dir}", here))
+        self.build_log(self.pages["Log"])
+        win.protocol("WM_DELETE_WINDOW", self.close)
+        self.show_tab("Settings")
+        self.focus()
+
+    def show_tab(self, name):
+        for n, page in self.pages.items():
+            page.pack_forget()
+            self.tab_buttons[n].configure(bg=ACCENT if n == name else FIELD, fg=FG if n == name else MUTED)
+        self.pages[name].pack(fill="both", expand=True)
+        if name == "Log":
+            self.reload_log()
+
+    # --- tab: settings (scrollable: it's a long list)
+    def build_settings(self, outer):
+        canvas = tk.Canvas(outer, bg=BG, highlightthickness=0)
+        scroll = tk.Scrollbar(outer, command=canvas.yview)
+        page = tk.Frame(canvas, bg=BG)
+        page.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.create_window((0, 0), window=page, anchor="nw")
+        canvas.configure(yscrollcommand=scroll.set)
+        scroll.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+        canvas.bind_all("<MouseWheel>", lambda e: canvas.yview_scroll(int(-e.delta / 120), "units")
+                        if self.alive() and self.pages["Settings"].winfo_ismapped() else None)
+        pred = self.app.predictions
 
         def header(text):
-            tk.Label(win, text=text, bg=BG, fg=ACCENT, font=FONT_B, anchor="w").pack(fill="x", pady=(10, 2))
+            tk.Label(page, text=text, bg=BG, fg=ACCENT, font=FONT_B, anchor="w").pack(fill="x", pady=(10, 2))
 
         def switch(key, text, value, note=""):
             v = tk.BooleanVar(value=value)
             self.vars[key] = v
-            row = tk.Frame(win, bg=BG)
+            row = tk.Frame(page, bg=BG)
             row.pack(fill="x")
             tk.Checkbutton(row, text=text, variable=v, command=lambda: self.changed(key), bg=BG, fg=FG,
                            selectcolor=FIELD, activebackground=BG, activeforeground=FG, font=FONT,
@@ -2021,37 +2195,138 @@ class SettingsWindow:
             if note:
                 tk.Label(row, text=note, bg=BG, fg=MUTED, font=(FONT[0], FONT[1] - 1)).pack(side="left", padx=6)
 
-        tk.Label(win, text="Careter Settings", bg=BG, fg=FG, font=(FONT[0], FONT[1] + 4, "bold"),
-                 anchor="w").pack(fill="x")
         header("Typing")
         switch("predict", "Word suggestions while I type", pred.enabled if pred else PREDICT,
                "(also: double-tap Ctrl)")
         switch("ghost", "Grey text after the cursor (Tab inserts it)", GHOST)
-        row = tk.Frame(win, bg=BG)
+        row = tk.Frame(page, bg=BG)
         row.pack(fill="x", pady=2)
-        tk.Label(row, text="   Suggestions in the list:", bg=BG, fg=FG, font=FONT).pack(side="left")
+        tk.Label(row, text="      Suggestions in the list:", bg=BG, fg=FG, font=FONT).pack(side="left")
         self.count = tk.IntVar(value=PREDICT_COUNT)
         for n in (3, 4, 5):
             tk.Radiobutton(row, text=str(n), value=n, variable=self.count, command=lambda: self.changed("count"),
                            bg=BG, fg=FG, selectcolor=FIELD, activebackground=BG, font=FONT).pack(side="left")
-        switch("autocorrect", "Auto-correct typos when I press space", AUTOCORRECT, "(Backspace undoes)")
+        switch("autocorrect", "Auto-correct typos when I press space", AUTOCORRECT, "(Backspace right after undoes)")
         switch("terminals", "Also suggest in terminals (PowerShell, cmd)", PREDICT_IN_TERMINALS)
         header("Smarter suggestions")
-        switch("engine", "Use the local AI model (SmolLM2)", PREDICT_ENGINE == "llm", "(restart to apply)")
-        header("Learning (stays on this PC, encrypted)")
+        switch("engine", "Use the local AI model (SmolLM2)", PREDICT_ENGINE == "llm", "(applies after a restart)")
+
+        header("AI assistant  (Ctrl+Alt+Space)")
+        self.ai = {}
+
+        def field(label, key, value, secret=False, hint=""):
+            row = tk.Frame(page, bg=BG)
+            row.pack(fill="x", pady=2)
+            tk.Label(row, text=label, bg=BG, fg=FG, font=FONT, width=14, anchor="w").pack(side="left")
+            e = tk.Entry(row, bg=FIELD, fg=FG, insertbackground=FG, relief="flat", font=FONT, width=44,
+                         show="•" if secret else "")
+            e.insert(0, value)
+            e.pack(side="left", ipady=3)
+            self.ai[key] = e
+            if hint:
+                tk.Label(row, text=hint, bg=BG, fg=MUTED, font=(FONT[0], FONT[1] - 1)).pack(side="left", padx=6)
+            return e
+
+        field("Model name", "model", MODEL, hint="e.g. gpt-6-luna")
+        key_entry = field("API key", "key", os.environ.get("OPENAI_API_KEY", ""), secret=True)
+        self.show_key = tk.BooleanVar(value=False)
+        tk.Checkbutton(key_entry.master, text="Show", variable=self.show_key, bg=BG, fg=FG, selectcolor=FIELD,
+                       activebackground=BG, activeforeground=FG, font=FONT,
+                       command=lambda: key_entry.configure(show="" if self.show_key.get() else "•")).pack(side="left", padx=6)
+        field("API address", "base", os.environ.get("OPENAI_BASE_URL", ""),
+              hint="empty = OpenAI")
+        tk.Label(page, text="      Any OpenAI-compatible service works: e.g. OpenRouter https://openrouter.ai/api/v1, "
+                 "Groq https://api.groq.com/openai/v1, Ollama http://localhost:11434/v1",
+                 bg=BG, fg=MUTED, font=(FONT[0], FONT[1] - 1), anchor="w", justify="left",
+                 wraplength=620).pack(fill="x")
+        row = tk.Frame(page, bg=BG)
+        row.pack(fill="x", pady=(4, 0))
+        self.button(row, "Save & test", self.save_ai).pack(side="left")
+        tk.Label(row, text="saved in the .env file in the Careter folder", bg=BG, fg=MUTED,
+                 font=(FONT[0], FONT[1] - 1)).pack(side="left", padx=8)
+
+        header("Learning  (stays on this PC, encrypted)")
         switch("learn", "Learn my words and phrases", LEARN)
-        row = tk.Frame(win, bg=BG)
+        row = tk.Frame(page, bg=BG)
         row.pack(fill="x", pady=(4, 0))
         self.button(row, "Export what it learned…", self.export).pack(side="left")
         self.button(row, "Forget everything", self.forget).pack(side="left", padx=8)
         header("Startup")
         switch("autostart", "Start with Windows and keep running", self.autostart_on() if IS_WIN else False)
-        self.status = tk.Label(win, text="", bg=BG, fg=MUTED, font=(FONT[0], FONT[1] - 1), anchor="w")
-        self.status.pack(fill="x", pady=(10, 0))
+        tk.Label(page, text="New here? See the How to use tab.", bg=BG, fg=MUTED,
+                 font=(FONT[0], FONT[1] - 1), anchor="w").pack(fill="x", pady=(14, 4))
 
-        # live log: what Careter is doing (never what you typed)
-        header("Log")
-        bar = tk.Frame(win, bg=BG)
+    def save_ai(self):
+        """Save the assistant's model, key and address, switch to them now, and test them."""
+        global MODEL, client
+        model = self.ai["model"].get().strip()
+        key = self.ai["key"].get().strip()
+        base = self.ai["base"].get().strip().rstrip("/")
+        if not model or not key:
+            self.say("Enter a model name and an API key.")
+            return
+        set_env_values({"CARET_AI_MODEL": model, "OPENAI_API_KEY": key, "OPENAI_BASE_URL": base or None})
+        MODEL = model
+        client = OpenAI(api_key=key, base_url=base or None)
+        self.say(f"Saved. Testing {model}…")
+
+        def test():
+            try:
+                client.chat.completions.create(model=model, max_tokens=5,
+                                               messages=[{"role": "user", "content": "Say OK"}])
+                msg = f"Works: the assistant now uses {model}."
+                log(f"settings: assistant model set to {model}, test OK")
+            except Exception as e:
+                msg = f"Saved, but the test failed: {str(e)[:160]}"
+                log(f"settings: assistant test failed for {model}: {str(e)[:200]}")
+            self.app.q.put(lambda: self.alive() and self.say(msg))
+        threading.Thread(target=test, daemon=True).start()
+
+    # --- tabs: how to use, install & update
+    def build_guide(self, page, content):
+        """Show a guide: '# ' headings, '## ' subheadings, '$ ' commands (click one to copy it)."""
+        t = tk.Text(page, bg=BG, fg=FG, relief="flat", wrap="word", font=FONT, padx=4, pady=2,
+                    cursor="arrow", highlightthickness=0, spacing1=2, spacing3=2)
+        scroll = tk.Scrollbar(page, command=t.yview)
+        t.configure(yscrollcommand=scroll.set)
+        scroll.pack(side="right", fill="y")
+        t.pack(side="left", fill="both", expand=True)
+        mono = ("Consolas", FONT[1]) if IS_WIN else ("Menlo", FONT[1] + 1)
+        t.tag_configure("h1", font=(FONT[0], FONT[1] + 4, "bold"), foreground=FG, spacing1=4, spacing3=6)
+        t.tag_configure("h2", font=FONT_B, foreground=ACCENT, spacing1=12, spacing3=3)
+        t.tag_configure("code", font=mono, background=FIELD, foreground="#e9e7ff", lmargin1=12, lmargin2=12,
+                        rmargin=12, spacing1=3, spacing3=3)
+        t.tag_configure("bullet", lmargin1=8, lmargin2=22)
+        t.tag_configure("hint", foreground=MUTED, font=(FONT[0], FONT[1] - 1))
+        t.tag_bind("code", "<Enter>", lambda e: t.configure(cursor="hand2"))
+        t.tag_bind("code", "<Leave>", lambda e: t.configure(cursor="arrow"))
+        t.tag_bind("code", "<Button-1>", lambda e: self.copy_code(t, e))
+        for line in content.strip("\n").split("\n"):
+            if line.startswith("# "):
+                t.insert("end", line[2:] + "\n", "h1")
+            elif line.startswith("## "):
+                t.insert("end", line[3:] + "\n", "h2")
+            elif line.startswith("$ "):
+                t.insert("end", line[2:] + "\n", "code")
+            elif line.startswith("• "):
+                t.insert("end", line + "\n", "bullet")
+            else:
+                t.insert("end", line + "\n")
+        if "\n$ " in content:
+            t.insert("end", "\nTip: click a command line to copy it.\n", "hint")
+        t.configure(state="disabled")
+
+    def copy_code(self, t, event):
+        index = t.index(f"@{event.x},{event.y}")
+        line = t.get(f"{index} linestart", f"{index} lineend").strip()
+        self.win.clipboard_clear()
+        self.win.clipboard_append(line)
+        self.say(f"Copied: {line}")
+
+    # --- tab: log
+    def build_log(self, page):
+        """What Careter is doing, live (never what you typed)."""
+        bar = tk.Frame(page, bg=BG)
         bar.pack(fill="x")
         self.only_predict = tk.BooleanVar(value=True)
         tk.Checkbutton(bar, text="Only word prediction", variable=self.only_predict, command=self.reload_log,
@@ -2059,9 +2334,9 @@ class SettingsWindow:
                        font=FONT).pack(side="left")
         self.button(bar, "Open log file", self.open_log).pack(side="right")
         self.button(bar, "Copy", self.copy_log).pack(side="right", padx=6)
-        box = tk.Frame(win, bg=BG)
-        box.pack(fill="both", expand=True, pady=(4, 0))
-        self.log_text = tk.Text(box, height=12, width=88, bg=FIELD, fg=FG, insertbackground=FG, relief="flat",
+        box = tk.Frame(page, bg=BG)
+        box.pack(fill="both", expand=True, pady=(6, 0))
+        self.log_text = tk.Text(box, height=20, width=88, bg=FIELD, fg=FG, insertbackground=FG, relief="flat",
                                 font=("Consolas", 9) if IS_WIN else ("Menlo", 10), wrap="none")
         scroll = tk.Scrollbar(box, command=self.log_text.yview)
         self.log_text.configure(yscrollcommand=scroll.set)
@@ -2071,17 +2346,8 @@ class SettingsWindow:
         self.on_log = lambda line: self.app.q.put(lambda: self.add_log(line))   # log() runs on any thread
         LOG_LISTENERS.append(self.on_log)
 
-        row = tk.Frame(win, bg=BG)
-        row.pack(fill="x", pady=(8, 0))
-        self.button(row, "Close", self.close).pack(side="right")
-        self.restart_btn = self.button(row, "Restart Careter", self.restart)
-        tk.Label(win, text="Keys: Tab = grey text · ↑↓ choose · 1–5 pick · Esc hide · Ctrl+Alt+Space = assistant "
-                 "· Ctrl+Alt+S = these settings", bg=BG, fg=MUTED, font=(FONT[0], FONT[1] - 1)).pack(fill="x", pady=(10, 0))
-        win.protocol("WM_DELETE_WINDOW", self.close)
-        self.focus()
-
     def wanted(self, line):
-        return not self.only_predict.get() or "predict" in line
+        return not self.only_predict.get() or "predict" in line or "settings:" in line
 
     def reload_log(self):
         self.log_text.configure(state="normal")
