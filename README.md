@@ -1,5 +1,7 @@
 # Careter
 
+**Makes you a faster typer.** Word suggestions, grey-text autocomplete and auto-correct in every Windows app, private on your PC, plus an AI assistant at your cursor.
+
 An AI that lives at your cursor. Point at any spot on screen (a terminal, an ebook, an editor, a form), press a hotkey, and type or speak what you want. Careter screenshots what you see, reads the text around that spot, proposes actions, asks you to confirm, runs them, looks at the result and continues until the goal is done.
 
 ## How it works

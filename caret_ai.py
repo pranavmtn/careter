@@ -2160,10 +2160,11 @@ def set_env_values(values):
             os.environ[k] = v
 
 
+TAGLINE = "Makes you a faster typer."
 SHARE_INSTALL = "irm https://raw.githubusercontent.com/pranavmtn/careter/main/install.ps1 | iex"
 SHARE_URL = "https://github.com/pranavmtn/careter"
 SHARE_POSTS = {
-    "LinkedIn": f"""Hey 👋 Found a little tool that has quietly cut down my keystrokes, and the time I spend typing, every single day. It's called Careter.
+    "LinkedIn": f"""Hey 👋 Found a little tool that has quietly cut down my keystrokes, and the time I spend typing, every single day. It's called Careter, and it makes you a faster typer.
 
 Phones finished our words years ago. On a PC, most apps still make you type every letter. Careter fixes that in every Windows app: Notepad, Word, Gmail, WhatsApp Web, chat tools, anywhere.
 
@@ -2184,7 +2185,7 @@ Free, code on GitHub: {SHARE_URL}
 Give it a day and see how many keystrokes it saves you 🙌
 
 #productivity #AI #Windows #techtools""",
-    "X": f"""Hey 👋 Found Careter: phone-style typing help for every Windows app.
+    "X": f"""Hey 👋 Found Careter. It makes you a faster typer, in every Windows app.
 
 ✨ Grey-text autocomplete (Tab)
 ✅ Auto-correct on space
@@ -2197,7 +2198,7 @@ Install (PowerShell):
 github.com/pranavmtn/careter""",
     "Instagram": """Hey 👋 Found a little tool that has quietly cut my keystrokes, and my typing time, every single day ⌨️⚡
 
-It's called Careter: phone-style word suggestions for every app on a Windows PC.
+It's called Careter, and it makes you a faster typer: phone-style word suggestions for every app on a Windows PC.
 
 ✨ Next word appears in grey, press Tab and it's typed
 ✅ Typos fixed as you hit space
@@ -2237,7 +2238,7 @@ class SettingsWindow:
         top.pack(fill="x")
         tk.Label(top, text="Careter", bg=S_BG, fg=S_FG, font=(S_FONT[0], S_FONT[1] + 9, "bold"),
                  anchor="w").pack(side="left")
-        tk.Label(top, text="  typing help for every app", bg=S_BG, fg=S_MUTED, font=S_FONT,
+        tk.Label(top, text="  " + TAGLINE, bg=S_BG, fg=S_MUTED, font=S_FONT,
                  anchor="sw").pack(side="left", pady=(10, 0))
         bar = tk.Frame(win, bg=S_BG)
         bar.pack(fill="x", pady=(14, 0))
@@ -2295,7 +2296,7 @@ class SettingsWindow:
         self.welcome = tk.Label(page, text="", bg=S_BG, fg=S_FG, font=(S_FONT[0], S_FONT[1] + 5, "bold"),
                                 anchor="w")
         self.welcome.pack(fill="x")
-        tk.Label(page, text="Word suggestions, grey-text autocomplete and auto-correct in every app, plus an AI "
+        tk.Label(page, text=TAGLINE + " Word suggestions, grey-text autocomplete and auto-correct in every app, plus an AI "
                  "assistant at your cursor. Everything for typing runs on this PC.", bg=S_BG, fg=S_MUTED,
                  font=S_FONT, anchor="w", justify="left", wraplength=660).pack(fill="x", pady=(2, 12))
         cards = tk.Frame(page, bg=S_BG)
