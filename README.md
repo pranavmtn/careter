@@ -74,6 +74,10 @@ Privacy: everything runs in the browser. Your learned words stay in this browser
 
 For the Chrome Web Store you'd also add icons, put a prebuilt `model.json` in the folder (the extension uses it instead of downloading), and write a privacy policy.
 
+## Settings
+
+Press **Ctrl+Alt+S** (or open **Careter Settings** from the Start menu, or run `python caret_ai.py --settings`) for one window with every switch: word suggestions, grey text, how many suggestions (3–5), auto-correct, suggestions in terminals, the local AI model, learning (with export / forget), and start-with-Windows. Choices are saved in `settings.json` and apply immediately (the AI model switch after **Restart Careter**). The window also shows the live log (only word prediction by default, never what you typed), with **Copy** to paste it when reporting a problem.
+
 ## Always running (Windows)
 
 ```powershell

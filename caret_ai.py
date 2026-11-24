@@ -73,6 +73,33 @@ AUTOCORRECT = os.getenv("CARET_AUTOCORRECT", "1") != "0"   # fix clear typos whe
 BROWSERS = {"chrome.exe", "msedge.exe", "brave.exe", "vivaldi.exe", "opera.exe", "chromium.exe"}
 WEB_PORT = 47822              # the Careter browser extension reports the caret here (127.0.0.1 only)
 LEARN = os.getenv("CARET_LEARN", "1") != "0"   # learn your words & word pairs (ngrams/user_model.dat, encrypted)
+GHOST = True                  # grey completion right after the cursor
+
+# Settings window (Ctrl+Alt+S) choices are saved here and win over the defaults above.
+SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "settings.json")
+SETTINGS = {"predict": "PREDICT", "ghost": "GHOST", "count": "PREDICT_COUNT", "autocorrect": "AUTOCORRECT",
+            "learn": "LEARN", "engine": "PREDICT_ENGINE", "terminals": "PREDICT_IN_TERMINALS"}
+
+
+def load_settings():
+    import json
+    try:
+        with open(SETTINGS_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return
+    for key, name in SETTINGS.items():
+        if key in data and type(data[key]) is type(globals()[name]):
+            globals()[name] = data[key]
+
+
+def save_settings():
+    import json
+    with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
+        json.dump({key: globals()[name] for key, name in SETTINGS.items()}, f, indent=1)
+
+
+load_settings()
 
 IS_MAC = platform.system() == "Darwin"
 IS_WIN = platform.system() == "Windows"
@@ -1341,7 +1368,7 @@ class Predictions:
 
     def learn_last(self):
         """A word was just finished (space/enter/accepted): count it, and the word before it."""
-        if not self.user_model or self.buf_proc in TERMINALS or self.in_browser_password():
+        if not LEARN or not self.user_model or self.buf_proc in TERMINALS or self.in_browser_password():
             return
         m = re.search(r"((?:[^\W\d_]|['’\-])+)\s\Z", self.buf)
         if not m:
@@ -1379,7 +1406,7 @@ class Predictions:
         if not down and vk in self.swallow_up:
             self.swallow_up.discard(vk)
             self.kb.suppress_event()
-        if down and vk in (0x20, 0x08) and self.enabled and self.speller and not self.fixing:
+        if down and vk in (0x20, 0x08) and self.enabled and AUTOCORRECT and self.speller and not self.fixing:
             ctrl, alt, _, win = self.mods()
             if not (ctrl or alt or win):
                 job = self.check_fix() if vk == 0x20 else self.check_undo()
@@ -1709,6 +1736,12 @@ class Predictions:
             return None
         return f"#{c & 0xFF:02x}{(c >> 8) & 0xFF:02x}{(c >> 16) & 0xFF:02x}"
 
+    def ghost_why(self, reason):
+        """Log why the grey text is or isn't shown, once per change (never the text itself)."""
+        if reason != getattr(self, "last_ghost_why", None):
+            self.last_ghost_why = reason
+            log(f"predict: grey text {'shown' if reason == 'shown' else 'skipped: ' + reason}")
+
     def place_ghost(self, point):
         if not self.ghost or not self.shown:
             return
@@ -1723,7 +1756,9 @@ class Predictions:
         bg = bg if text else None
         if not bg:
             self.w.ShowWindow(self.ghost_hwnd, 0)
+            self.ghost_why("text (or a pattern) right after the cursor, so it would cover it")
             return
+        self.ghost_why("shown")
         # the transparent colour = the line's own background, so the grey text's smoothed edges
         # blend into it and look like part of the app
         self.ghost.configure(bg=bg)
@@ -1852,11 +1887,14 @@ class Predictions:
                  for i, (w, ins) in enumerate(words)]
         self.fill(items)
         self.place_strip(point)
-        self.ghost_point = point if exact else None
+        self.ghost_point = point if (exact and GHOST) else None
         if self.ghost_point:
             self.place_ghost(point)
-        elif self.ghost:
-            self.w.ShowWindow(self.ghost_hwnd, 0)
+        else:
+            if self.ghost:
+                self.w.ShowWindow(self.ghost_hwnd, 0)
+            self.ghost_why("off in settings" if not GHOST else
+                           "this app doesn't tell Windows where the cursor is (list shown at the mouse)")
 
     def flash(self, text, point):
         if not self.strip:
@@ -1877,6 +1915,242 @@ class Predictions:
                 if self.ghost:
                     self.w.ShowWindow(self.ghost_hwnd, 0)
             self.app.q.put(_hide)
+
+
+class SettingsWindow:
+    """Careter Settings: every switch for word prediction in one small window (Ctrl+Alt+S)."""
+
+    def __init__(self, app):
+        self.app = app
+        win = self.win = tk.Toplevel(app.root)
+        win.title("Careter Settings")
+        win.configure(bg=BG, padx=18, pady=14)
+        win.resizable(False, False)
+        win.attributes("-topmost", True)
+        pred = app.predictions
+        self.vars = {}
+
+        def header(text):
+            tk.Label(win, text=text, bg=BG, fg=ACCENT, font=FONT_B, anchor="w").pack(fill="x", pady=(10, 2))
+
+        def switch(key, text, value, note=""):
+            v = tk.BooleanVar(value=value)
+            self.vars[key] = v
+            row = tk.Frame(win, bg=BG)
+            row.pack(fill="x")
+            tk.Checkbutton(row, text=text, variable=v, command=lambda: self.changed(key), bg=BG, fg=FG,
+                           selectcolor=FIELD, activebackground=BG, activeforeground=FG, font=FONT,
+                           anchor="w").pack(side="left")
+            if note:
+                tk.Label(row, text=note, bg=BG, fg=MUTED, font=(FONT[0], FONT[1] - 1)).pack(side="left", padx=6)
+
+        tk.Label(win, text="Careter Settings", bg=BG, fg=FG, font=(FONT[0], FONT[1] + 4, "bold"),
+                 anchor="w").pack(fill="x")
+        header("Typing")
+        switch("predict", "Word suggestions while I type", pred.enabled if pred else PREDICT,
+               "(also: double-tap Ctrl)")
+        switch("ghost", "Grey text after the cursor (Tab inserts it)", GHOST)
+        row = tk.Frame(win, bg=BG)
+        row.pack(fill="x", pady=2)
+        tk.Label(row, text="   Suggestions in the list:", bg=BG, fg=FG, font=FONT).pack(side="left")
+        self.count = tk.IntVar(value=PREDICT_COUNT)
+        for n in (3, 4, 5):
+            tk.Radiobutton(row, text=str(n), value=n, variable=self.count, command=lambda: self.changed("count"),
+                           bg=BG, fg=FG, selectcolor=FIELD, activebackground=BG, font=FONT).pack(side="left")
+        switch("autocorrect", "Auto-correct typos when I press space", AUTOCORRECT, "(Backspace undoes)")
+        switch("terminals", "Also suggest in terminals (PowerShell, cmd)", PREDICT_IN_TERMINALS)
+        header("Smarter suggestions")
+        switch("engine", "Use the local AI model (SmolLM2)", PREDICT_ENGINE == "llm", "(restart to apply)")
+        header("Learning (stays on this PC, encrypted)")
+        switch("learn", "Learn my words and phrases", LEARN)
+        row = tk.Frame(win, bg=BG)
+        row.pack(fill="x", pady=(4, 0))
+        self.button(row, "Export what it learned…", self.export).pack(side="left")
+        self.button(row, "Forget everything", self.forget).pack(side="left", padx=8)
+        header("Startup")
+        switch("autostart", "Start with Windows and keep running", self.autostart_on() if IS_WIN else False)
+        self.status = tk.Label(win, text="", bg=BG, fg=MUTED, font=(FONT[0], FONT[1] - 1), anchor="w")
+        self.status.pack(fill="x", pady=(10, 0))
+
+        # live log: what Careter is doing (never what you typed)
+        header("Log")
+        bar = tk.Frame(win, bg=BG)
+        bar.pack(fill="x")
+        self.only_predict = tk.BooleanVar(value=True)
+        tk.Checkbutton(bar, text="Only word prediction", variable=self.only_predict, command=self.reload_log,
+                       bg=BG, fg=FG, selectcolor=FIELD, activebackground=BG, activeforeground=FG,
+                       font=FONT).pack(side="left")
+        self.button(bar, "Open log file", self.open_log).pack(side="right")
+        self.button(bar, "Copy", self.copy_log).pack(side="right", padx=6)
+        box = tk.Frame(win, bg=BG)
+        box.pack(fill="both", expand=True, pady=(4, 0))
+        self.log_text = tk.Text(box, height=12, width=88, bg=FIELD, fg=FG, insertbackground=FG, relief="flat",
+                                font=("Consolas", 9) if IS_WIN else ("Menlo", 10), wrap="none")
+        scroll = tk.Scrollbar(box, command=self.log_text.yview)
+        self.log_text.configure(yscrollcommand=scroll.set)
+        scroll.pack(side="right", fill="y")
+        self.log_text.pack(side="left", fill="both", expand=True)
+        self.reload_log()
+        self.on_log = lambda line: self.app.q.put(lambda: self.add_log(line))   # log() runs on any thread
+        LOG_LISTENERS.append(self.on_log)
+
+        row = tk.Frame(win, bg=BG)
+        row.pack(fill="x", pady=(8, 0))
+        self.button(row, "Close", self.close).pack(side="right")
+        self.restart_btn = self.button(row, "Restart Careter", self.restart)
+        tk.Label(win, text="Keys: Tab = grey text · ↑↓ choose · 1–5 pick · Esc hide · Ctrl+Alt+Space = assistant "
+                 "· Ctrl+Alt+S = these settings", bg=BG, fg=MUTED, font=(FONT[0], FONT[1] - 1)).pack(fill="x", pady=(10, 0))
+        win.protocol("WM_DELETE_WINDOW", self.close)
+        self.focus()
+
+    def wanted(self, line):
+        return not self.only_predict.get() or "predict" in line
+
+    def reload_log(self):
+        self.log_text.configure(state="normal")
+        self.log_text.delete("1.0", "end")
+        for line in LOG_LINES:
+            if self.wanted(line):
+                self.log_text.insert("end", line + "\n")
+        self.log_text.see("end")
+        self.log_text.configure(state="disabled")
+
+    def add_log(self, line):
+        if not self.alive() or not self.wanted(line):
+            return
+        at_bottom = self.log_text.yview()[1] > 0.98
+        self.log_text.configure(state="normal")
+        self.log_text.insert("end", line + "\n")
+        if int(self.log_text.index("end-1c").split(".")[0]) > 500:
+            self.log_text.delete("1.0", "2.0")
+        if at_bottom:
+            self.log_text.see("end")
+        self.log_text.configure(state="disabled")
+
+    def copy_log(self):
+        self.win.clipboard_clear()
+        self.win.clipboard_append(self.log_text.get("1.0", "end-1c"))
+        self.say("Log copied: paste it to Claude to diagnose anything.")
+
+    def open_log(self):
+        try:
+            os.startfile(LOG_PATH) if IS_WIN else None
+        except OSError:
+            self.say(f"Log file: {LOG_PATH}")
+
+    def close(self):
+        if self.on_log in LOG_LISTENERS:
+            LOG_LISTENERS.remove(self.on_log)
+        self.win.destroy()
+
+    def button(self, parent, text, cmd):
+        return tk.Button(parent, text=text, command=cmd, bg=FIELD, fg=FG, activebackground=ACCENT,
+                         activeforeground=FG, relief="flat", font=FONT, padx=10, pady=3, cursor="hand2")
+
+    def alive(self):
+        try:
+            return bool(self.win.winfo_exists())
+        except tk.TclError:
+            return False
+
+    def focus(self):
+        self.win.deiconify()
+        self.win.lift()
+        self.win.focus_force()
+
+    def say(self, text):
+        self.status.configure(text=text)
+
+    @staticmethod
+    def autostart_on():
+        import subprocess
+        try:
+            return subprocess.run(["schtasks", "/Query", "/TN", TASK_NAME], capture_output=True).returncode == 0
+        except OSError:
+            return False
+
+    def changed(self, key):
+        global PREDICT, GHOST, PREDICT_COUNT, AUTOCORRECT, LEARN, PREDICT_ENGINE, PREDICT_IN_TERMINALS
+        pred = self.app.predictions
+        if key == "count":
+            PREDICT_COUNT = self.count.get()
+        elif key == "autostart":
+            on = self.vars[key].get()
+            self.say("Setting up auto-start…")
+            threading.Thread(target=lambda: (autostart_command("on" if on else "off"),
+                                             self.app.q.put(lambda: self.say(
+                                                 "Auto-start is " + ("on." if on else "off.")))),
+                             daemon=True).start()
+            return
+        else:
+            v = self.vars[key].get()
+            if key == "predict":
+                PREDICT = v
+                if pred and pred.enabled != v:
+                    pred.toggle()
+            elif key == "ghost":
+                GHOST = v
+            elif key == "autocorrect":
+                AUTOCORRECT = v
+            elif key == "learn":
+                LEARN = v
+                if v and pred and not pred.user_model:
+                    self.show_restart("Learning starts after a restart.")
+            elif key == "terminals":
+                PREDICT_IN_TERMINALS = v
+            elif key == "engine":
+                PREDICT_ENGINE = "llm" if v else "ngram"
+                self.show_restart("The AI model setting applies after a restart.")
+        save_settings()
+        if key not in ("engine",) and not self.status.cget("text").startswith("The AI"):
+            self.say("Saved.")
+
+    def show_restart(self, text):
+        self.say(text)
+        self.restart_btn.pack(side="right", padx=8)
+
+    def export(self):
+        from tkinter import filedialog
+        path = filedialog.asksaveasfilename(parent=self.win, defaultextension=".json",
+                                            initialfile="careter_learned.json", filetypes=[("JSON", "*.json")])
+        if not path:
+            return
+        pred = self.app.predictions
+        if pred and pred.user_model:
+            pred.save_learned()
+        learned_data_command(["--export-learned", path])
+        self.say(f"Exported to {path}. It's plain text: delete it when you're done.")
+
+    def forget(self):
+        from tkinter import messagebox
+        if not messagebox.askyesno("Forget everything?", "Delete all the words and phrases Careter learned "
+                                   "from your typing? This can't be undone.", parent=self.win):
+            return
+        pred = self.app.predictions
+        if pred and pred.user_model:
+            with pred.user_model.lock:
+                pred.user_model.uni.clear()
+                pred.user_model.bi.clear()
+                pred.user_model.dirty = False
+        if pred and pred.speller:
+            pred.speller.user.clear()
+        learned_data_command(["--forget-learned"])
+        self.say("Forgot everything it learned.")
+
+    def restart(self):
+        """Start a fresh Careter in 2 seconds (after this one has let go of its lock), then quit."""
+        import subprocess
+        pyw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
+        pyw = pyw if os.path.exists(pyw) else sys.executable
+        script = os.path.abspath(__file__)
+        code = (f"import time,subprocess;time.sleep(2);"
+                f"subprocess.Popen([{pyw!r},{script!r}],cwd={os.path.dirname(script)!r})")
+        flags = 0x00000008 | 0x00000200 if IS_WIN else 0          # DETACHED_PROCESS | NEW_PROCESS_GROUP
+        subprocess.Popen([pyw, "-c", code], creationflags=flags, close_fds=True)
+        pred = self.app.predictions
+        if pred:
+            pred.save_learned()
+        os._exit(0)
 
 
 class App:
@@ -1900,13 +2174,33 @@ class App:
             if self.predictions:
                 hotkeys[2] = (0x2 | 0x1, ord("P"), self.predictions.toggle)    # Ctrl+Alt+P
                 self.double_ctrl = DoubleCtrl(self.predictions.toggle)         # double-tap Ctrl
+            hotkeys[3] = (0x2 | 0x1, ord("S"), lambda: self.q.put(self.open_settings))  # Ctrl+Alt+S
             threading.Thread(target=windows_hotkey_loop, args=(hotkeys,), daemon=True).start()
         else:
             keyboard.GlobalHotKeys({HOTKEY: self.on_hotkey}).start()
         print(f"Careter running ({MODEL}). Press {HOTKEY} anywhere. Ctrl+C here to quit.")
         if self.predictions:
             print(f"Word prediction: {'on' if PREDICT else 'off'} ({PREDICT_HOTKEY} toggles). "
-                  "Tab takes the grey text, up/down choose, 1-5 pick directly.")
+                  "Tab takes the grey text, up/down choose, 1-5 pick directly. Settings: Ctrl+Alt+S.")
+
+    def listen_commands(self, lock):
+        """The single-instance lock socket also takes commands from `caret_ai.py --settings`."""
+        lock.listen(2)
+        while True:
+            try:
+                conn, _ = lock.accept()
+                with conn:
+                    conn.settimeout(1)
+                    if conn.recv(64).strip() == b"CARETER SETTINGS":
+                        self.q.put(self.open_settings)
+            except OSError:
+                return
+
+    def open_settings(self):
+        if getattr(self, "settings_win", None) and self.settings_win.alive():
+            self.settings_win.focus()
+        else:
+            self.settings_win = SettingsWindow(self)
 
     def pump(self):
         while not self.q.empty():
@@ -2180,5 +2474,14 @@ if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "--stop":
         stop_command()
         sys.exit(0)
+    if len(sys.argv) > 1 and sys.argv[1] == "--settings":
+        try:                                   # open the window in the running Careter
+            with socket.create_connection(("127.0.0.1", 47821), timeout=2) as c:
+                c.sendall(b"CARETER SETTINGS\n")
+        except OSError:
+            print("Careter isn't running. Start it first.")
+        sys.exit(0)
     _lock = single_instance_lock()
-    App().run()
+    app = App()
+    threading.Thread(target=app.listen_commands, args=(_lock,), daemon=True).start()
+    app.run()

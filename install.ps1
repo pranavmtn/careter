@@ -32,6 +32,14 @@ $Lnk.Arguments = "`"$Dir\caret_ai.py`""
 $Lnk.WorkingDirectory = $Dir
 $Lnk.Save()
 
+# Start menu: "Careter Settings" opens the settings window of the running Careter
+$Programs = [Environment]::GetFolderPath("Programs")
+$Set = $Shell.CreateShortcut((Join-Path $Programs "Careter Settings.lnk"))
+$Set.TargetPath = $PyW
+$Set.Arguments = "`"$Dir\caret_ai.py`" --settings"
+$Set.WorkingDirectory = $Dir
+$Set.Save()
+
 # Keep it running: a scheduled task starts it at login and brings it back within 5 minutes if it
 # stops (replaces the shortcut above when Windows allows a login trigger). This also starts it now.
 & "$Dir\.venv\Scripts\python.exe" "$Dir\caret_ai.py" --autostart on
