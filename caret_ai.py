@@ -683,6 +683,12 @@ WRAP = 380
 STRIP_BG, STRIP_BORDER, STRIP_FG, STRIP_NUM = "#2b2e35", "#4b505a", "#ffffff", "#8f96a3"
 STRIP_SEL = "#41464f"         # the highlighted row (Tab / Enter-free pick, moved with up/down)
 GHOST_FG = "#9aa0a6"          # grey completion shown right after the cursor
+# settings window: a light, modern theme (white, near-black text, grey details)
+S_BG, S_FG, S_MUTED, S_LINE = "#ffffff", "#111827", "#6b7280", "#e5e7eb"
+S_FIELD, S_SOFT, S_DARK = "#f3f4f6", "#f9fafb", "#111827"
+S_FONT = ("Segoe UI", 10) if IS_WIN else ("Helvetica", 12)
+S_SMALL = (S_FONT[0], S_FONT[1] - 1)
+S_BOLD = (S_FONT[0], S_FONT[1], "bold")
 STRIP_FONT = ("Segoe UI", 11) if IS_WIN else ("Helvetica", 13)
 STRIP_NUM_FONT = ("Segoe UI", 9) if IS_WIN else ("Helvetica", 11)
 STRIP_RADIUS = 14
@@ -1994,6 +2000,26 @@ class Predictions:
             self.app.q.put(_hide)
 
 
+HELP_HOME = """## What Careter solves
+• Typing on a PC is slow and full of small mistakes, and most apps offer no word suggestions or spelling fixes at all. Careter adds both to every app: Notepad, Word, browsers, chat apps, anywhere you type.
+• Phones have had this for years. On Windows the choices are basic (Windows' own suggestions), paid, or closed (other tools keep what they learn about you in encrypted files you can't look into).
+• Careter is free, works offline, learns how you write, never sends what you type anywhere, and keeps what it learns encrypted on your PC, where you can export or delete it.
+• For anything bigger than a word, the AI assistant is one key away (Ctrl+Alt+Space).
+
+## What was hard to build
+• Finding the cursor in every app. Most modern apps don't tell Windows where you're typing. Careter combines three sources (the classic Windows caret, Windows' accessibility interface, and a small browser extension for websites) and falls back to the mouse when none works.
+• Drawing inside other apps. Windows doesn't allow it, so the grey text is a see-through, click-through window placed exactly at the cursor and tinted to match the app's background. Even making it appear took a fix: on 64-bit Windows the window calls failed silently until window handles were passed with exact types.
+• Speed without freezing your keyboard. The first AI version needed up to 28 seconds per suggestion and made typing lag, because the AI and the keyboard watcher shared one process. Now the AI runs in its own low-priority process, word lists answer first in about 0.1 s, and the AI only replaces them when it finds something better.
+• Borrowing keys without breaking apps. Tab, the arrows and the numbers belong to Careter only while the list is showing, and Careter ignores the keys it types itself.
+• Auto-correct you can trust. Fixing "aknoldgement" (three mistakes) fast enough to run on every space needed a pre-built index, and it must never touch names, passwords, Manglish or your own words, always one Backspace from undo.
+• Privacy. Nothing you type is logged, what it learns is encrypted with your Windows login, personal names are never suggested, and password boxes are skipped.
+
+## Ideas for next
+• A phone keyboard (Android first) with the same engine, and optional sync of what it learned.
+• Better Malayalam and Manglish suggestions.
+• Publishing the Chrome extension.
+"""
+
 HELP_USE = """# Getting started
 Careter runs quietly in the background. You don't open it: just type anywhere (Notepad, Word, Gmail, WhatsApp Web, chat apps…) and it helps you type.
 
@@ -2113,99 +2139,156 @@ class SettingsWindow:
     """Careter Settings (Ctrl+Alt+S): tabs for the switches, a how-to for new users, install and update
     steps, and the live log."""
 
-    TABS = ("Settings", "How to use", "Install & update", "Log")
+    TABS = ("Home", "Settings", "How to use", "Install & update", "Log")
 
     def __init__(self, app):
         self.app = app
         win = self.win = tk.Toplevel(app.root)
         win.title("Careter Settings")
-        win.configure(bg=BG, padx=16, pady=12)
+        win.configure(bg=S_BG, padx=24, pady=18)
         win.attributes("-topmost", True)
-        win.minsize(680, 600)
+        win.minsize(720, 640)
         self.vars = {}
         here = os.path.dirname(os.path.abspath(__file__))
 
-        tk.Label(win, text="Careter", bg=BG, fg=FG, font=(FONT[0], FONT[1] + 5, "bold"),
-                 anchor="w").pack(fill="x")
-        bar = tk.Frame(win, bg=BG)
-        bar.pack(fill="x", pady=(8, 0))
+        top = tk.Frame(win, bg=S_BG)
+        top.pack(fill="x")
+        tk.Label(top, text="Careter", bg=S_BG, fg=S_FG, font=(S_FONT[0], S_FONT[1] + 9, "bold"),
+                 anchor="w").pack(side="left")
+        tk.Label(top, text="  typing help for every app", bg=S_BG, fg=S_MUTED, font=S_FONT,
+                 anchor="sw").pack(side="left", pady=(10, 0))
+        bar = tk.Frame(win, bg=S_BG)
+        bar.pack(fill="x", pady=(14, 0))
         self.tab_buttons, self.pages = {}, {}
-        for name in self.TABS:
-            b = tk.Label(bar, text=name, bg=FIELD, fg=MUTED, font=FONT_B, padx=14, pady=6, cursor="hand2")
-            b.pack(side="left", padx=(0, 4))
-            b.bind("<Button-1>", lambda e, n=name: self.show_tab(n))
-            self.tab_buttons[name] = b
-        tk.Frame(win, bg=ACCENT, height=2).pack(fill="x")
-        body = tk.Frame(win, bg=BG)
+        for name in self.TABS:                      # underline tabs: the chosen one is black + underlined
+            cell = tk.Frame(bar, bg=S_BG, cursor="hand2")
+            cell.pack(side="left", padx=(0, 22))
+            lbl = tk.Label(cell, text=name, bg=S_BG, fg=S_MUTED, font=S_BOLD, pady=4, cursor="hand2")
+            lbl.pack()
+            line = tk.Frame(cell, bg=S_BG, height=2)
+            line.pack(fill="x")
+            for w in (cell, lbl):
+                w.bind("<Button-1>", lambda e, n=name: self.show_tab(n))
+            self.tab_buttons[name] = (lbl, line)
+        tk.Frame(win, bg=S_LINE, height=1).pack(fill="x")
+        body = tk.Frame(win, bg=S_BG)
         body.pack(fill="both", expand=True, pady=(10, 0))
         for name in self.TABS:
-            self.pages[name] = tk.Frame(body, bg=BG)
+            self.pages[name] = tk.Frame(body, bg=S_BG)
 
         # the status line and buttons are created first so every tab can use them
-        self.bottom = tk.Frame(win, bg=BG)
-        self.status = tk.Label(self.bottom, text="", bg=BG, fg=MUTED, font=(FONT[0], FONT[1] - 1), anchor="w")
+        self.bottom = tk.Frame(win, bg=S_BG)
+        self.status = tk.Label(self.bottom, text="", bg=S_BG, fg=S_MUTED, font=S_SMALL, anchor="w")
         self.status.pack(fill="x", pady=(8, 0))
-        row = tk.Frame(self.bottom, bg=BG)
+        row = tk.Frame(self.bottom, bg=S_BG)
         row.pack(fill="x", pady=(6, 0))
         self.button(row, "Close", self.close).pack(side="right")
         self.restart_btn = self.button(row, "Restart Careter", self.restart)
         self.bottom.pack(fill="x", side="bottom")
 
+        self.build_home(self.pages["Home"])
         self.build_settings(self.pages["Settings"])
         self.build_guide(self.pages["How to use"], HELP_USE)
         self.build_guide(self.pages["Install & update"], HELP_INSTALL.replace("{dir}", here))
         self.build_log(self.pages["Log"])
         win.protocol("WM_DELETE_WINDOW", self.close)
-        self.show_tab("Settings")
+        self.show_tab("Home")
         self.focus()
 
     def show_tab(self, name):
         for n, page in self.pages.items():
             page.pack_forget()
-            self.tab_buttons[n].configure(bg=ACCENT if n == name else FIELD, fg=FG if n == name else MUTED)
+            lbl, line = self.tab_buttons[n]
+            lbl.configure(fg=S_FG if n == name else S_MUTED)
+            line.configure(bg=S_DARK if n == name else S_BG)
         self.pages[name].pack(fill="both", expand=True)
         if name == "Log":
             self.reload_log()
+        if name == "Home":
+            self.refresh_home()
+
+    # --- tab: home
+    def build_home(self, page):
+        tk.Label(page, text="Welcome to Careter", bg=S_BG, fg=S_FG, font=(S_FONT[0], S_FONT[1] + 5, "bold"),
+                 anchor="w").pack(fill="x")
+        tk.Label(page, text="Word suggestions, grey-text autocomplete and auto-correct in every app, plus an AI "
+                 "assistant at your cursor. Everything for typing runs on this PC.", bg=S_BG, fg=S_MUTED,
+                 font=S_FONT, anchor="w", justify="left", wraplength=660).pack(fill="x", pady=(2, 12))
+        cards = tk.Frame(page, bg=S_BG)
+        cards.pack(fill="x")
+        self.cards = {}
+        for i, (key, title) in enumerate([("predict", "Suggestions"), ("autocorrect", "Auto-correct"),
+                                          ("learned", "Words learned"), ("model", "Assistant model")]):
+            card = tk.Frame(cards, bg=S_SOFT, highlightthickness=1, highlightbackground=S_LINE, padx=14, pady=10)
+            card.grid(row=0, column=i, sticky="nsew", padx=(0 if i == 0 else 10, 0))
+            cards.grid_columnconfigure(i, weight=1, uniform="cards")
+            tk.Label(card, text=title.upper(), bg=S_SOFT, fg=S_MUTED, font=(S_FONT[0], S_FONT[1] - 2, "bold"),
+                     anchor="w").pack(fill="x")
+            value = tk.Label(card, text="…", bg=S_SOFT, fg=S_FG, font=(S_FONT[0], S_FONT[1] + 4, "bold"), anchor="w")
+            value.pack(fill="x", pady=(4, 0))
+            self.cards[key] = value
+        row = tk.Frame(page, bg=S_BG)
+        row.pack(fill="x", pady=(14, 4))
+        self.button(row, "How to use", lambda: self.show_tab("How to use"), primary=True).pack(side="left")
+        self.button(row, "Settings", lambda: self.show_tab("Settings")).pack(side="left", padx=8)
+        self.button(row, "Install & update", lambda: self.show_tab("Install & update")).pack(side="left")
+        tk.Label(row, text="Ctrl+Alt+S opens this window", bg=S_BG, fg=S_MUTED, font=S_SMALL).pack(side="right")
+        tk.Frame(page, bg=S_LINE, height=1).pack(fill="x", pady=(10, 0))
+        story = tk.Frame(page, bg=S_BG)
+        story.pack(fill="both", expand=True)
+        self.build_guide(story, HELP_HOME)
+
+    def refresh_home(self):
+        pred = self.app.predictions
+        on = lambda b: "On" if b else "Off"
+        self.cards["predict"].configure(text=on(pred.enabled if pred else PREDICT))
+        self.cards["autocorrect"].configure(text=on(AUTOCORRECT and bool(pred and pred.speller)))
+        n = len(pred.user_model.uni) if (pred and pred.user_model) else 0
+        self.cards["learned"].configure(text=f"{n:,}" if LEARN else "Off")
+        self.cards["model"].configure(text=MODEL if len(MODEL) <= 16 else MODEL[:15] + "…")
 
     # --- tab: settings (scrollable: it's a long list)
     def build_settings(self, outer):
-        canvas = tk.Canvas(outer, bg=BG, highlightthickness=0)
+        canvas = tk.Canvas(outer, bg=S_BG, highlightthickness=0)
         scroll = tk.Scrollbar(outer, command=canvas.yview)
-        page = tk.Frame(canvas, bg=BG)
+        page = tk.Frame(canvas, bg=S_BG)
         page.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
         canvas.create_window((0, 0), window=page, anchor="nw")
         canvas.configure(yscrollcommand=scroll.set)
         scroll.pack(side="right", fill="y")
         canvas.pack(side="left", fill="both", expand=True)
-        canvas.bind_all("<MouseWheel>", lambda e: canvas.yview_scroll(int(-e.delta / 120), "units")
-                        if self.alive() and self.pages["Settings"].winfo_ismapped() else None)
+        wheel = lambda e: canvas.yview_scroll(int(-e.delta / 120), "units")
+        canvas.bind("<Enter>", lambda e: canvas.bind_all("<MouseWheel>", wheel))   # only while the mouse
+        canvas.bind("<Leave>", lambda e: canvas.unbind_all("<MouseWheel>"))       # is over this list
         pred = self.app.predictions
 
         def header(text):
-            tk.Label(page, text=text, bg=BG, fg=ACCENT, font=FONT_B, anchor="w").pack(fill="x", pady=(10, 2))
+            tk.Frame(page, bg=S_LINE, height=1).pack(fill="x", pady=(14, 0))
+            tk.Label(page, text=text.upper(), bg=S_BG, fg=S_MUTED, font=(S_FONT[0], S_FONT[1] - 2, "bold"),
+                     anchor="w").pack(fill="x", pady=(8, 4))
 
         def switch(key, text, value, note=""):
             v = tk.BooleanVar(value=value)
             self.vars[key] = v
-            row = tk.Frame(page, bg=BG)
+            row = tk.Frame(page, bg=S_BG)
             row.pack(fill="x")
-            tk.Checkbutton(row, text=text, variable=v, command=lambda: self.changed(key), bg=BG, fg=FG,
-                           selectcolor=FIELD, activebackground=BG, activeforeground=FG, font=FONT,
+            tk.Checkbutton(row, text=text, variable=v, command=lambda: self.changed(key), bg=S_BG, fg=S_FG,
+                           selectcolor=S_BG, activebackground=S_BG, activeforeground=S_FG, font=S_FONT,
                            anchor="w").pack(side="left")
             if note:
-                tk.Label(row, text=note, bg=BG, fg=MUTED, font=(FONT[0], FONT[1] - 1)).pack(side="left", padx=6)
+                tk.Label(row, text=note, bg=S_BG, fg=S_MUTED, font=S_SMALL).pack(side="left", padx=6)
 
         header("Typing")
         switch("predict", "Word suggestions while I type", pred.enabled if pred else PREDICT,
                "(also: double-tap Ctrl)")
         switch("ghost", "Grey text after the cursor (Tab inserts it)", GHOST)
-        row = tk.Frame(page, bg=BG)
+        row = tk.Frame(page, bg=S_BG)
         row.pack(fill="x", pady=2)
-        tk.Label(row, text="      Suggestions in the list:", bg=BG, fg=FG, font=FONT).pack(side="left")
+        tk.Label(row, text="      Suggestions in the list:", bg=S_BG, fg=S_FG, font=S_FONT).pack(side="left")
         self.count = tk.IntVar(value=PREDICT_COUNT)
         for n in (3, 4, 5):
             tk.Radiobutton(row, text=str(n), value=n, variable=self.count, command=lambda: self.changed("count"),
-                           bg=BG, fg=FG, selectcolor=FIELD, activebackground=BG, font=FONT).pack(side="left")
+                           bg=S_BG, fg=S_FG, selectcolor=S_BG, activebackground=S_BG, font=S_FONT).pack(side="left")
         switch("autocorrect", "Auto-correct typos when I press space", AUTOCORRECT, "(Backspace right after undoes)")
         switch("terminals", "Also suggest in terminals (PowerShell, cmd)", PREDICT_IN_TERMINALS)
         header("Smarter suggestions")
@@ -2215,46 +2298,47 @@ class SettingsWindow:
         self.ai = {}
 
         def field(label, key, value, secret=False, hint=""):
-            row = tk.Frame(page, bg=BG)
+            row = tk.Frame(page, bg=S_BG)
             row.pack(fill="x", pady=2)
-            tk.Label(row, text=label, bg=BG, fg=FG, font=FONT, width=14, anchor="w").pack(side="left")
-            e = tk.Entry(row, bg=FIELD, fg=FG, insertbackground=FG, relief="flat", font=FONT, width=44,
-                         show="•" if secret else "")
+            tk.Label(row, text=label, bg=S_BG, fg=S_FG, font=S_FONT, width=14, anchor="w").pack(side="left")
+            e = tk.Entry(row, bg=S_SOFT, fg=S_FG, insertbackground=S_FG, relief="flat", font=S_FONT, width=44,
+                         show="•" if secret else "", highlightthickness=1, highlightbackground=S_LINE,
+                         highlightcolor=S_DARK)
             e.insert(0, value)
             e.pack(side="left", ipady=3)
             self.ai[key] = e
             if hint:
-                tk.Label(row, text=hint, bg=BG, fg=MUTED, font=(FONT[0], FONT[1] - 1)).pack(side="left", padx=6)
+                tk.Label(row, text=hint, bg=S_BG, fg=S_MUTED, font=S_SMALL).pack(side="left", padx=6)
             return e
 
         field("Model name", "model", MODEL, hint="e.g. gpt-6-luna")
         key_entry = field("API key", "key", os.environ.get("OPENAI_API_KEY", ""), secret=True)
         self.show_key = tk.BooleanVar(value=False)
-        tk.Checkbutton(key_entry.master, text="Show", variable=self.show_key, bg=BG, fg=FG, selectcolor=FIELD,
-                       activebackground=BG, activeforeground=FG, font=FONT,
+        tk.Checkbutton(key_entry.master, text="Show", variable=self.show_key, bg=S_BG, fg=S_FG, selectcolor=S_BG,
+                       activebackground=S_BG, activeforeground=S_FG, font=S_FONT,
                        command=lambda: key_entry.configure(show="" if self.show_key.get() else "•")).pack(side="left", padx=6)
         field("API address", "base", os.environ.get("OPENAI_BASE_URL", ""),
               hint="empty = OpenAI")
         tk.Label(page, text="      Any OpenAI-compatible service works: e.g. OpenRouter https://openrouter.ai/api/v1, "
                  "Groq https://api.groq.com/openai/v1, Ollama http://localhost:11434/v1",
-                 bg=BG, fg=MUTED, font=(FONT[0], FONT[1] - 1), anchor="w", justify="left",
+                 bg=S_BG, fg=S_MUTED, font=S_SMALL, anchor="w", justify="left",
                  wraplength=620).pack(fill="x")
-        row = tk.Frame(page, bg=BG)
+        row = tk.Frame(page, bg=S_BG)
         row.pack(fill="x", pady=(4, 0))
-        self.button(row, "Save & test", self.save_ai).pack(side="left")
-        tk.Label(row, text="saved in the .env file in the Careter folder", bg=BG, fg=MUTED,
-                 font=(FONT[0], FONT[1] - 1)).pack(side="left", padx=8)
+        self.button(row, "Save & test", self.save_ai, primary=True).pack(side="left")
+        tk.Label(row, text="saved in the .env file in the Careter folder", bg=S_BG, fg=S_MUTED,
+                 font=S_SMALL).pack(side="left", padx=8)
 
         header("Learning  (stays on this PC, encrypted)")
         switch("learn", "Learn my words and phrases", LEARN)
-        row = tk.Frame(page, bg=BG)
+        row = tk.Frame(page, bg=S_BG)
         row.pack(fill="x", pady=(4, 0))
         self.button(row, "Export what it learned…", self.export).pack(side="left")
         self.button(row, "Forget everything", self.forget).pack(side="left", padx=8)
         header("Startup")
         switch("autostart", "Start with Windows and keep running", self.autostart_on() if IS_WIN else False)
-        tk.Label(page, text="New here? See the How to use tab.", bg=BG, fg=MUTED,
-                 font=(FONT[0], FONT[1] - 1), anchor="w").pack(fill="x", pady=(14, 4))
+        tk.Label(page, text="New here? See the How to use tab.", bg=S_BG, fg=S_MUTED,
+                 font=S_SMALL, anchor="w").pack(fill="x", pady=(14, 4))
 
     def save_ai(self):
         """Save the assistant's model, key and address, switch to them now, and test them."""
@@ -2285,19 +2369,19 @@ class SettingsWindow:
     # --- tabs: how to use, install & update
     def build_guide(self, page, content):
         """Show a guide: '# ' headings, '## ' subheadings, '$ ' commands (click one to copy it)."""
-        t = tk.Text(page, bg=BG, fg=FG, relief="flat", wrap="word", font=FONT, padx=4, pady=2,
+        t = tk.Text(page, bg=S_BG, fg=S_FG, relief="flat", wrap="word", font=S_FONT, padx=4, pady=2,
                     cursor="arrow", highlightthickness=0, spacing1=2, spacing3=2)
         scroll = tk.Scrollbar(page, command=t.yview)
         t.configure(yscrollcommand=scroll.set)
         scroll.pack(side="right", fill="y")
         t.pack(side="left", fill="both", expand=True)
-        mono = ("Consolas", FONT[1]) if IS_WIN else ("Menlo", FONT[1] + 1)
-        t.tag_configure("h1", font=(FONT[0], FONT[1] + 4, "bold"), foreground=FG, spacing1=4, spacing3=6)
-        t.tag_configure("h2", font=FONT_B, foreground=ACCENT, spacing1=12, spacing3=3)
-        t.tag_configure("code", font=mono, background=FIELD, foreground="#e9e7ff", lmargin1=12, lmargin2=12,
+        mono = ("Consolas", S_FONT[1]) if IS_WIN else ("Menlo", S_FONT[1] + 1)
+        t.tag_configure("h1", font=(S_FONT[0], S_FONT[1] + 4, "bold"), foreground=S_FG, spacing1=4, spacing3=6)
+        t.tag_configure("h2", font=(S_FONT[0], S_FONT[1] + 1, "bold"), foreground=S_FG, spacing1=14, spacing3=4)
+        t.tag_configure("code", font=mono, background=S_FIELD, foreground=S_FG, lmargin1=12, lmargin2=12,
                         rmargin=12, spacing1=3, spacing3=3)
         t.tag_configure("bullet", lmargin1=8, lmargin2=22)
-        t.tag_configure("hint", foreground=MUTED, font=(FONT[0], FONT[1] - 1))
+        t.tag_configure("hint", foreground=S_MUTED, font=S_SMALL)
         t.tag_bind("code", "<Enter>", lambda e: t.configure(cursor="hand2"))
         t.tag_bind("code", "<Leave>", lambda e: t.configure(cursor="arrow"))
         t.tag_bind("code", "<Button-1>", lambda e: self.copy_code(t, e))
@@ -2326,17 +2410,18 @@ class SettingsWindow:
     # --- tab: log
     def build_log(self, page):
         """What Careter is doing, live (never what you typed)."""
-        bar = tk.Frame(page, bg=BG)
+        bar = tk.Frame(page, bg=S_BG)
         bar.pack(fill="x")
         self.only_predict = tk.BooleanVar(value=True)
         tk.Checkbutton(bar, text="Only word prediction", variable=self.only_predict, command=self.reload_log,
-                       bg=BG, fg=FG, selectcolor=FIELD, activebackground=BG, activeforeground=FG,
-                       font=FONT).pack(side="left")
+                       bg=S_BG, fg=S_FG, selectcolor=S_BG, activebackground=S_BG, activeforeground=S_FG,
+                       font=S_FONT).pack(side="left")
         self.button(bar, "Open log file", self.open_log).pack(side="right")
         self.button(bar, "Copy", self.copy_log).pack(side="right", padx=6)
-        box = tk.Frame(page, bg=BG)
+        box = tk.Frame(page, bg=S_BG)
         box.pack(fill="both", expand=True, pady=(6, 0))
-        self.log_text = tk.Text(box, height=20, width=88, bg=FIELD, fg=FG, insertbackground=FG, relief="flat",
+        self.log_text = tk.Text(box, height=20, width=88, bg=S_SOFT, fg=S_FG, insertbackground=S_FG, relief="flat",
+                                highlightthickness=1, highlightbackground=S_LINE,
                                 font=("Consolas", 9) if IS_WIN else ("Menlo", 10), wrap="none")
         scroll = tk.Scrollbar(box, command=self.log_text.yview)
         self.log_text.configure(yscrollcommand=scroll.set)
@@ -2386,9 +2471,13 @@ class SettingsWindow:
             LOG_LISTENERS.remove(self.on_log)
         self.win.destroy()
 
-    def button(self, parent, text, cmd):
-        return tk.Button(parent, text=text, command=cmd, bg=FIELD, fg=FG, activebackground=ACCENT,
-                         activeforeground=FG, relief="flat", font=FONT, padx=10, pady=3, cursor="hand2")
+    def button(self, parent, text, cmd, primary=False):
+        if primary:
+            return tk.Button(parent, text=text, command=cmd, bg=S_DARK, fg="#ffffff", activebackground="#374151",
+                             activeforeground="#ffffff", relief="flat", bd=0, font=S_BOLD, padx=14, pady=5,
+                             cursor="hand2")
+        return tk.Button(parent, text=text, command=cmd, bg=S_FIELD, fg=S_FG, activebackground=S_LINE,
+                         activeforeground=S_FG, relief="flat", font=S_FONT, padx=10, pady=3, cursor="hand2")
 
     def alive(self):
         try:
