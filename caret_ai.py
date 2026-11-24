@@ -696,6 +696,12 @@ STRIP_NUM_FONT = ("Segoe UI", 9) if IS_WIN else ("Helvetica", 11)
 STRIP_RADIUS = 14
 
 
+def x_length(text):
+    """Characters as X counts them: each link is 23, emoji count double."""
+    urls = re.findall(r"https?://\S+|\b[\w.-]+\.(?:com|org|io|dev|app)/\S*", text)
+    return len(text) + sum(23 - len(u) for u in urls) + sum(1 for c in text if ord(c) > 0xFFFF)
+
+
 def round_window(hwnd, border_hex=None):
     """Windows 11: smooth rounded corners (and a thin border colour) for one of our windows."""
     import ctypes
@@ -2154,11 +2160,68 @@ def set_env_values(values):
             os.environ[k] = v
 
 
+SHARE_INSTALL = "irm https://raw.githubusercontent.com/pranavmtn/careter/main/install.ps1 | iex"
+SHARE_URL = "https://github.com/pranavmtn/careter"
+SHARE_POSTS = {
+    "LinkedIn": f"""Hey 👋 Found a little tool that has quietly cut down my keystrokes, and the time I spend typing, every single day. It's called Careter.
+
+Phones finished our words years ago. On a PC, most apps still make you type every letter. Careter fixes that in every Windows app: Notepad, Word, Gmail, WhatsApp Web, chat tools, anywhere.
+
+✨ What I love about it
+• The next word shows up as grey text right after the cursor. Tab, and it's typed
+• A small list of 5 options under the line: ↑ ↓ or 1–5 to pick
+• Typos fixed as I hit space ("teh" → "the"), one Backspace to undo
+• It learns the words and phrases I use most
+• Ctrl+Alt+Space opens an AI assistant right at my cursor
+
+🔒 Private by design: suggestions, auto-correct and what it learns stay on my PC (encrypted). Only the assistant goes online, and only to the AI service I pick.
+
+⚡ Install on Windows (one line in PowerShell):
+{SHARE_INSTALL}
+
+Free, code on GitHub: {SHARE_URL}
+
+Give it a day and see how many keystrokes it saves you 🙌
+
+#productivity #AI #Windows #techtools""",
+    "X": f"""Hey 👋 Found Careter: phone-style typing help for every Windows app.
+
+✨ Grey-text autocomplete (Tab)
+✅ Auto-correct on space
+🧠 Learns your words
+🔒 Typing stays on your PC
+
+Install (PowerShell):
+{SHARE_INSTALL}
+
+github.com/pranavmtn/careter""",
+    "Instagram": """Hey 👋 Found a little tool that has quietly cut my keystrokes, and my typing time, every single day ⌨️⚡
+
+It's called Careter: phone-style word suggestions for every app on a Windows PC.
+
+✨ Next word appears in grey, press Tab and it's typed
+✅ Typos fixed as you hit space
+🧠 Learns the words YOU use
+🤖 Ctrl+Alt+Space = AI assistant at your cursor
+🔒 Your typing never leaves your PC
+
+Free to install: one line in PowerShell. Steps at github.com/pranavmtn/careter 🔗
+
+#productivity #techtools #windows #ai #typing""",
+}
+# where "Copy & open" goes; X can take the text in the link, the others get it from the clipboard
+SHARE_OPEN = {
+    "LinkedIn": "https://www.linkedin.com/feed/",
+    "X": "https://x.com/intent/tweet?text={text}",
+    "Instagram": "https://www.instagram.com/",
+}
+
+
 class SettingsWindow:
     """Careter Settings (Ctrl+Alt+S): tabs for the switches, a how-to for new users, install and update
     steps, and the live log."""
 
-    TABS = ("Home", "Settings", "How to use", "Install & update", "Log")
+    TABS = ("Home", "Settings", "How to use", "Install & update", "Share", "Log")
 
     def __init__(self, app):
         self.app = app
@@ -2209,6 +2272,7 @@ class SettingsWindow:
         self.build_settings(self.pages["Settings"])
         self.build_guide(self.pages["How to use"], HELP_USE)
         self.build_guide(self.pages["Install & update"], HELP_INSTALL.replace("{dir}", here))
+        self.build_share(self.pages["Share"])
         self.build_log(self.pages["Log"])
         win.protocol("WM_DELETE_WINDOW", self.close)
         self.show_tab("Home")
@@ -2252,6 +2316,7 @@ class SettingsWindow:
         self.button(row, "How to use", lambda: self.show_tab("How to use"), primary=True).pack(side="left")
         self.button(row, "Settings", lambda: self.show_tab("Settings")).pack(side="left", padx=8)
         self.button(row, "Install & update", lambda: self.show_tab("Install & update")).pack(side="left")
+        self.button(row, "Share Careter", lambda: self.show_tab("Share")).pack(side="left", padx=8)
         tk.Label(row, text="Ctrl+Alt+S opens this window", bg=S_BG, fg=S_MUTED, font=S_SMALL).pack(side="right")
         privacy = tk.Frame(page, bg=S_SOFT, highlightthickness=1, highlightbackground=S_LINE, padx=14, pady=10)
         privacy.pack(fill="x", pady=(10, 0))
@@ -2479,6 +2544,56 @@ class SettingsWindow:
         self.win.clipboard_clear()
         self.win.clipboard_append(line)
         self.say(f"Copied: {line}")
+
+    # --- tab: share
+    def build_share(self, outer):
+        canvas = tk.Canvas(outer, bg=S_BG, highlightthickness=0)
+        scroll = tk.Scrollbar(outer, command=canvas.yview)
+        page = tk.Frame(canvas, bg=S_BG)
+        page.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.create_window((0, 0), window=page, anchor="nw")
+        canvas.configure(yscrollcommand=scroll.set)
+        scroll.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+        wheel = lambda e: canvas.yview_scroll(int(-e.delta / 120), "units")
+        canvas.bind("<Enter>", lambda e: canvas.bind_all("<MouseWheel>", wheel))
+        canvas.bind("<Leave>", lambda e: canvas.unbind_all("<MouseWheel>"))
+
+        tk.Label(page, text="Share Careter", bg=S_BG, fg=S_FG, font=(S_FONT[0], S_FONT[1] + 5, "bold"),
+                 anchor="w").pack(fill="x")
+        tk.Label(page, text="Like it? Tell your friends. Pick a platform: the post is copied for you, so just "
+                 "paste it (or make it your own) and share.", bg=S_BG, fg=S_MUTED, font=S_FONT, anchor="w",
+                 justify="left", wraplength=640).pack(fill="x", pady=(2, 8))
+        for name, text in SHARE_POSTS.items():
+            card = tk.Frame(page, bg=S_SOFT, highlightthickness=1, highlightbackground=S_LINE, padx=14, pady=10)
+            card.pack(fill="x", pady=(8, 0), padx=(0, 6))
+            head = tk.Frame(card, bg=S_SOFT)
+            head.pack(fill="x")
+            tk.Label(head, text=name, bg=S_SOFT, fg=S_FG, font=(S_FONT[0], S_FONT[1] + 1, "bold")).pack(side="left")
+            if name == "X":
+                tk.Label(head, text=f"  {x_length(text)}/280", bg=S_SOFT, fg=S_MUTED, font=S_SMALL).pack(side="left")
+            self.button(head, f"Copy & open {name}", lambda n=name: self.share(n, True), primary=True).pack(side="right")
+            self.button(head, "Copy", lambda n=name: self.share(n, False)).pack(side="right", padx=6)
+            lines = min(12, text.count("\n") + 2)
+            t = tk.Text(card, height=lines, width=78, bg=S_BG, fg=S_FG, relief="flat", wrap="word", font=S_SMALL,
+                        highlightthickness=1, highlightbackground=S_LINE, padx=8, pady=6)
+            t.insert("1.0", text)
+            t.configure(state="disabled")
+            t.pack(fill="x", pady=(8, 0))
+
+    def share(self, name, open_site):
+        import urllib.parse
+        import webbrowser
+        text = SHARE_POSTS[name]
+        self.win.clipboard_clear()
+        self.win.clipboard_append(text)
+        if not open_site:
+            self.say(f"{name} post copied. Paste it wherever you like.")
+            return
+        webbrowser.open(SHARE_OPEN[name].replace("{text}", urllib.parse.quote(text)))
+        self.say(f"Opening {name}: the post is filled in, check it and post." if name == "X" else
+                 f"Opening {name}: the post is copied, paste it with Ctrl+V and share.")
+        log(f"settings: share via {name}")
 
     # --- tab: log
     def build_log(self, page):
