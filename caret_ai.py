@@ -1350,8 +1350,11 @@ class Predictions:
         if not before.strip() or not before[-1].isspace():
             return                             # first word in a box (maybe a username/password)
         tail = before.rstrip()
+        sentence_start = tail[-1] in ".!?\n"
+        if word[:1].isupper() and not sentence_start and word != "I" and not word.startswith(("I'", "I’")):
+            return                             # a capitalised word mid-sentence: a name or place
         pm = re.search(r"((?:[^\W\d_]|['’\-])+)\Z", tail)
-        prev = pm.group(1).lower() if (pm and tail[-1] not in ".!?") else None
+        prev = pm.group(1).lower() if (pm and not sentence_start) else None
         self.user_model.learn(prev, word.lower().replace("’", "'"))
 
     def toggle(self):
@@ -1546,6 +1549,7 @@ class Predictions:
                 return why(f"skipped, {proc} is a terminal")
             if self.app.session and self.app.session.acting:
                 return
+            from predict import worth_predicting
             web = self.web.fresh(self.last_key_at) if (self.web and proc in BROWSERS) else None
             if web and web.get("password"):
                 return why("skipped, password box (browser)")
@@ -1554,7 +1558,7 @@ class Predictions:
             first = None
             fast_text = (web.get("text") or "") if web else self.buf
             fast_point = web_point(web, hwnd) if web else caret_rect()
-            if self.fast_predictor and fast_text.strip() and fast_point:
+            if self.fast_predictor and worth_predicting(fast_text) and fast_point:
                 words = self.fast_predictor.predict(fast_text, PREDICT_COUNT)
                 if words and gen == self.gen:
                     first = (words, fast_point)
@@ -1577,6 +1581,8 @@ class Predictions:
                 return
             if not text.strip():
                 return why(f"no text before caret in {proc} (uia={'yes' if uia else 'no'})")
+            if not worth_predicting(text):
+                return                         # start of a sentence: wait for the first letter
             t0 = time.time()
             words = self.predictor.predict(text, PREDICT_COUNT, cancelled=lambda: gen != self.gen)
             ms = (time.time() - t0) * 1000

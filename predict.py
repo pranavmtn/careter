@@ -11,6 +11,8 @@ import os
 import re
 import threading
 
+from names import NAMES                    # personal names are never suggested
+
 os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")   # harmless on Windows without symlinks
 
 WORD = r"[^\W_]|['’\-]"                   # letters/digits plus ' ’ - inside words
@@ -134,7 +136,7 @@ class Predictor:
 
     @staticmethod
     def _finish(finished, word, score, p):
-        if len(word) > len(p) and word.lower().startswith(p):
+        if len(word) > len(p) and word.lower().startswith(p) and word.lower() not in NAMES:
             key = word.lower()
             if key not in finished or finished[key][1] < score:
                 finished[key] = (word, score)
@@ -278,6 +280,14 @@ def read_context(text):
     return partial, prev, start
 
 
+def worth_predicting(text):
+    """False where suggestions would just be generic filler ("The", "A", "I"): an empty box, a new
+    line, the start of a sentence or right after a comma, with no letter typed yet. There we wait for
+    the first letter."""
+    ctx = read_context(text)
+    return bool(ctx and (ctx[0] or ctx[1]))           # a letter typed, or a word right before
+
+
 def shape(w, partial, start):
     """(shown word, text to type) for lowercase word w, keeping the case of what was typed."""
     rest = w[len(partial):]
@@ -354,7 +364,7 @@ class NGramPredictor:
         p = partial.lower()
         picks = []
         def add(w):
-            if len(w) > len(p) and w.startswith(p) and w not in picks:
+            if len(w) > len(p) and w.startswith(p) and w not in picks and w not in NAMES:
                 picks.append(w)
         for w in self.bi.get(prev, []) if prev else []:
             add(w)
@@ -627,12 +637,21 @@ class UserModel:
             data = json.loads(raw.decode("utf-8"))
             self.uni, self.bi = data.get("words", {}), data.get("pairs", {})
             self.dirty = from_legacy                    # re-save encrypted, then drop the plain file
+            if any(w in NAMES for w in self.uni):       # forget names learned before this rule
+                self.uni = {w: c for w, c in self.uni.items() if w not in NAMES}
+                self.bi = {a: {b: c for b, c in d.items() if b not in NAMES}
+                           for a, d in self.bi.items() if a not in NAMES}
+                self.dirty = True
 
     def export(self):
         with self.lock:
             return {"words": dict(self.uni), "pairs": {a: dict(d) for a, d in self.bi.items()}}
 
     def learn(self, prev, word):
+        if word in NAMES:
+            return
+        if prev in NAMES:
+            prev = None
         with self.lock:
             self.uni[word] = self.uni.get(word, 0) + 1
             if prev:
@@ -646,13 +665,13 @@ class UserModel:
             out = []
             after = self.bi.get(prev, {}) if prev else {}
             for w, c in sorted(after.items(), key=lambda kv: -kv[1]):
-                if c >= 2 and len(w) > len(p) and w.startswith(p) and w not in out:
+                if c >= 2 and len(w) > len(p) and w.startswith(p) and w not in out and w not in NAMES:
                     out.append(w)
             if p:
                 for w, c in sorted(self.uni.items(), key=lambda kv: -kv[1]):
                     if len(out) >= n:
                         break
-                    if c >= 3 and len(w) > len(p) and w.startswith(p) and w not in out:
+                    if c >= 3 and len(w) > len(p) and w.startswith(p) and w not in out and w not in NAMES:
                         out.append(w)
             return out[:n]
 

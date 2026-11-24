@@ -88,6 +88,7 @@ async function handle(msg) {
       return { enabled: on };
     }
     case "predict":
+      if (!E.worthPredicting(msg.text)) return { words: [] };   // sentence start: wait for a letter
       await ensure();
       return { words: E.personalPredict(ngram, user, msg.text, msg.n || 5) };
     case "correct":

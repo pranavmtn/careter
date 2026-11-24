@@ -9,6 +9,9 @@ const PARTIAL_RE = new RegExp(WORD_CH + "*$", "u");
 const TAIL_WORD_RE = new RegExp("(" + WORD_CH + "+)$", "u");
 const SENTENCE_END = ".!?\n";
 
+// Personal names: never suggested (still treated as correctly spelled). Generated from names.py.
+const NAMES = new Set(["aaron", "abhijith", "abhishek", "abigail", "abraham", "adam", "adams", "adarsh", "aditya", "adrian", "agarwal", "ahmed", "aiden", "ajay", "akhil", "akshay", "alan", "albert", "alex", "alexander", "alexis", "alice", "alicia", "allen", "allison", "alvarez", "amanda", "amber", "amit", "amy", "anand", "anderson", "andrea", "andrew", "angela", "anil", "anish", "anjali", "anjana", "ankit", "ann", "anna", "anne", "anoop", "anthony", "antonio", "anu", "aparna", "aravind", "arjun", "arun", "ashley", "ashwin", "aswathy", "aswin", "athira", "audrey", "austin", "ava", "ayesha", "banerjee", "barbara", "ben", "benjamin", "bennett", "betty", "beverly", "biju", "billy", "bose", "brandon", "brenda", "brian", "brittany", "brown", "bruce", "bryan", "caleb", "cameron", "carl", "carlos", "caroline", "castillo", "catherine", "charles", "charlotte", "chatterjee", "chavez", "cherian", "cheryl", "chloe", "chopra", "chris", "christina", "christine", "christopher", "cindy", "claire", "clark", "collins", "cruz", "cynthia", "dan", "daniel", "danielle", "dave", "david", "davies", "davis", "debbie", "deborah", "debra", "deepa", "deepak", "denise", "dennis", "deshmukh", "devika", "diana", "diane", "diaz", "divya", "donald", "donna", "doris", "dorothy", "douglas", "dylan", "edward", "edwards", "elijah", "elizabeth", "ella", "emily", "emma", "eric", "ethan", "eugene", "evans", "evelyn", "fathima", "flores", "gabriel", "garcia", "gary", "george", "gerald", "ghosh", "gloria", "gokul", "gomez", "gonzalez", "gopika", "gregory", "gupta", "gutierrez", "hannah", "hari", "harold", "harris", "heather", "helen", "henry", "hernandez", "howard", "hrishikesh", "hughes", "hussain", "isabella", "iyer", "jackson", "jacob", "jacobs", "jacqueline", "jain", "james", "janet", "janice", "jason", "jayan", "jayden", "jeffrey", "jennifer", "jenny", "jeremy", "jerry", "jesse", "jessica", "jessie", "jibin", "jim", "jimenez", "jinu", "jishnu", "jithin", "joan", "joe", "john", "johnny", "johnson", "jomon", "jonathan", "jones", "jordan", "jose", "joseph", "josh", "joshi", "joshua", "joyce", "juan", "judith", "judy", "julia", "julie", "justin", "kapoor", "karen", "kate", "katherine", "kathleen", "kathryn", "kathy", "kavya", "kayla", "keerthi", "keith", "kelly", "kenneth", "kevin", "kimberly", "kiran", "kulkarni", "kumar", "kurian", "kurup", "kyle", "larry", "laura", "lauren", "lekha", "lewis", "liam", "linda", "linu", "lisa", "logan", "lopez", "lori", "louis", "lucas", "madison", "mahesh", "malhotra", "manoj", "manu", "margaret", "maria", "marie", "marilyn", "martha", "martin", "martinez", "mary", "mathew", "matt", "matthew", "meera", "megan", "mehta", "melissa", "mendoza", "menon", "mia", "michael", "michel", "michelle", "midhun", "mike", "miller", "mishra", "mitchell", "mohammad", "mohammed", "moore", "morales", "morgan", "morris", "muhammed", "mukherjee", "murphy", "myers", "nair", "nandana", "nandu", "natalie", "nathan", "neha", "nelson", "nguyen", "nicholas", "nick", "nicole", "nikhil", "nimisha", "nithya", "noah", "oliver", "olivia", "ortiz", "pamela", "pandey", "parker", "parvathy", "patel", "patricia", "patrick", "paul", "perez", "peter", "peterson", "phil", "philip", "phillips", "pillai", "pooja", "pranav", "priya", "rachel", "rahul", "rajesh", "raju", "ralph", "ramesh", "ramos", "randy", "rao", "ravi", "raymond", "rebecca", "reddy", "rejith", "renjith", "reshma", "revathi", "reyes", "richard", "richardson", "robert", "roberts", "robinson", "rodriguez", "roger", "rogers", "rohit", "ronald", "ross", "ruiz", "russell", "ruth", "ryan", "sachin", "saji", "sajith", "samantha", "samuel", "sanchez", "sandra", "sanjay", "sara", "sarah", "scott", "sean", "shah", "shaji", "sharma", "sharon", "shibu", "shirley", "shyam", "singh", "sinu", "smith", "sneha", "sophia", "sophie", "sreeja", "sreejith", "sreekumar", "sruthi", "stephanie", "stephen", "steve", "steven", "stewart", "sujith", "sunil", "suresh", "susan", "taylor", "teresa", "theresa", "thomas", "thompson", "tim", "timothy", "tinu", "tiwari", "tom", "torres", "tyler", "unni", "varghese", "varma", "varun", "verma", "victoria", "vijay", "vincent", "vinod", "vipin", "vivek", "walter", "watson", "wayne", "william", "williams", "wilson", "wright", "yadav", "zachary", "zoe"]);
+
 const COMMON_TYPOS = {"teh": "the", "hte": "the", "thw": "the", "tje": "the", "adn": "and", "nad": "and", "anf": "and", "taht": "that", "tht": "that", "thta": "that", "waht": "what", "whta": "what", "wiht": "with", "wtih": "with", "jsut": "just", "juts": "just", "thier": "their", "theyre": "they're", "becuase": "because", "becasue": "because", "beacuse": "because", "recieve": "receive", "recieved": "received", "beleive": "believe", "wierd": "weird", "freind": "friend", "freinds": "friends", "untill": "until", "occured": "occurred", "seperate": "separate", "definately": "definitely", "goverment": "government", "tommorow": "tomorrow", "tommorrow": "tomorrow", "tomorow": "tomorrow", "realy": "really", "alot": "a lot", "dont": "don't", "doesnt": "doesn't", "didnt": "didn't", "cant": "can't", "wont": "won't", "isnt": "isn't", "wasnt": "wasn't", "im": "I'm", "ive": "I've", "youre": "you're", "knwo": "know", "konw": "know", "nwo": "now", "ot": "to", "fo": "of", "fro": "for", "ofr": "for", "yuo": "you", "yoru": "your", "abotu": "about", "aboutt": "about", "woudl": "would", "coudl": "could", "shoudl": "should", "whihc": "which", "wehn": "when", "becaus": "because", "pleae": "please", "plese": "please", "thnaks": "thanks", "thansk": "thanks", "msot": "most", "frist": "first", "thign": "thing", "thigns": "things", "agian": "again"};
 
 // (partial word being typed, previous word or null, at sentence start) or null where a suggestion
@@ -24,6 +27,13 @@ function readContext(text) {
   const m = tail.match(TAIL_WORD_RE);
   const prev = m && !start ? m[1].toLowerCase() : null;
   return { partial, prev, start };
+}
+
+// False where suggestions would just be generic filler ("The", "A", "I"): an empty box, a new line,
+// the start of a sentence or right after a comma, with no letter typed yet: wait for the first letter.
+function worthPredicting(text) {
+  const ctx = readContext(text);
+  return !!(ctx && (ctx.partial || ctx.prev));        // a letter typed, or a word right before
 }
 
 // [shown word, text to insert] for lowercase word w, keeping the case of what was typed.
@@ -60,7 +70,7 @@ class NGram {
     if (!ctx) return [];
     const p = ctx.partial.toLowerCase();
     const picks = [];
-    const add = (w) => { if (w.length > p.length && w.startsWith(p) && !picks.includes(w)) picks.push(w); };
+    const add = (w) => { if (w.length > p.length && w.startsWith(p) && !picks.includes(w) && !NAMES.has(w)) picks.push(w); };
     if (ctx.prev) for (const w of this.after(ctx.prev)) { add(w); if (picks.length >= n) break; }
     if (picks.length < n) {
       const pool = p.length >= 2 ? this.by2.get(p.slice(0, 2)) || [] : p ? this.by1.get(p) || [] : this.words;
@@ -76,8 +86,15 @@ class UserModel {
     this.uni = (data && data.words) || {};
     this.bi = (data && data.pairs) || {};
     this.keep = new Set((data && data.keep) || []);   // words you undid: never corrected
+    for (const w of Object.keys(this.uni)) if (NAMES.has(w)) delete this.uni[w];
+    for (const a of Object.keys(this.bi)) {
+      if (NAMES.has(a)) { delete this.bi[a]; continue; }
+      for (const b of Object.keys(this.bi[a])) if (NAMES.has(b)) delete this.bi[a][b];
+    }
   }
   learn(prev, word) {
+    if (NAMES.has(word)) return;
+    if (NAMES.has(prev)) prev = null;
     this.uni[word] = (this.uni[word] || 0) + 1;
     if (prev) { const d = (this.bi[prev] = this.bi[prev] || {}); d[word] = (d[word] || 0) + 1; }
   }
@@ -85,10 +102,10 @@ class UserModel {
     const out = [];
     const after = prev ? this.bi[prev] || {} : {};
     for (const [w, c] of Object.entries(after).sort((a, b) => b[1] - a[1]))
-      if (c >= 2 && w.length > p.length && w.startsWith(p) && !out.includes(w)) out.push(w);
+      if (c >= 2 && w.length > p.length && w.startsWith(p) && !out.includes(w) && !NAMES.has(w)) out.push(w);
     if (p) for (const [w, c] of Object.entries(this.uni).sort((a, b) => b[1] - a[1])) {
       if (out.length >= n) break;
-      if (c >= 3 && w.length > p.length && w.startsWith(p) && !out.includes(w)) out.push(w);
+      if (c >= 3 && w.length > p.length && w.startsWith(p) && !out.includes(w) && !NAMES.has(w)) out.push(w);
     }
     return out.slice(0, n);
   }
@@ -220,6 +237,6 @@ function buildModel(text1w, text2w, maxWords = 50000, maxPrev = 20000, perPrev =
   return { version: 1, words, bi };
 }
 
-const CareterEngine = { readContext, shape, NGram, UserModel, Speller, personalPredict, buildModel, osa, COMMON_TYPOS };
+const CareterEngine = { NAMES, readContext, worthPredicting, shape, NGram, UserModel, Speller, personalPredict, buildModel, osa, COMMON_TYPOS };
 if (typeof module !== "undefined") module.exports = CareterEngine;
 else self.CareterEngine = CareterEngine;

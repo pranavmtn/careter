@@ -268,13 +268,17 @@
     if (!before.trim() || !/\s$/.test(before)) return null;
     const tail = before.trimEnd();
     const pm = tail.match(/([\p{L}'’\-]+)$/u);
-    const prev = pm && !".!?".includes(tail.slice(-1)) ? pm[1].toLowerCase() : null;
-    return { word: m[1], prev };
+    const start = ".!?\n".includes(tail.slice(-1));
+    const prev = pm && !start ? pm[1].toLowerCase() : null;
+    return { word: m[1], prev, start };
   }
 
   function learnFrom(textEndingInSpace) {
     const w = lastWord(textEndingInSpace.replace(/\s$/, ""));
-    if (w && !/\d/.test(w.word)) ask({ type: "learn", prev: w.prev, word: w.word.toLowerCase().replace("’", "'") });
+    if (!w || /\d/.test(w.word)) return;
+    const capital = w.word[0] !== w.word[0].toLowerCase();
+    if (capital && !w.start && w.word !== "I" && !/^I['’]/.test(w.word)) return;   // a name or place
+    ask({ type: "learn", prev: w.prev, word: w.word.toLowerCase().replace("’", "'") });
   }
 
   async function onSpace(e, el) {
