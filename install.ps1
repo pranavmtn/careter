@@ -17,17 +17,9 @@ python -m venv .venv
 & "$Dir\.venv\Scripts\python.exe" -m pip install -r requirements.txt
 
 $EnvFile = Join-Path $Dir ".env"
-if (-not ((Test-Path $EnvFile) -and (Select-String -Path $EnvFile -Pattern "OPENAI_API_KEY" -Quiet))) {
-    Write-Host "Word suggestions, grey text and auto-correct work without any key."
-    Write-Host "The Ctrl+Alt+Space AI assistant needs one (you can add it later: Ctrl+Alt+S > Settings > AI assistant)."
-    $Key = Read-Host "Paste your OpenAI API key, or just press Enter to skip"
-    if ($Key.Trim()) { Add-Content -Path $EnvFile -Value "OPENAI_API_KEY=$($Key.Trim())" }
-    else {
-        # remember the choice so re-running the installer doesn't ask again (Careter ignores # lines)
-        Add-Content -Path $EnvFile -Value "# OPENAI_API_KEY skipped at install: add one in Settings > AI assistant"
-        Write-Host "Skipped. Careter works without the assistant until you add a key."
-    }
-}
+if (-not (Test-Path $EnvFile)) { New-Item -ItemType File -Path $EnvFile | Out-Null }
+# No API key needed to install: typing help works without one. The Ctrl+Alt+Space assistant's key
+# is added later in Ctrl+Alt+S > Settings > AI assistant.
 
 # Start at login, without a console window
 $PyW = "$Dir\.venv\Scripts\pythonw.exe"
@@ -52,4 +44,14 @@ $Set.Save()
 & "$Dir\.venv\Scripts\python.exe" "$Dir\caret_ai.py" --autostart on
 if ($LASTEXITCODE -ne 0) { Start-Process $PyW -ArgumentList "`"$Dir\caret_ai.py`"" -WorkingDirectory $Dir }
 Write-Host ""
-Write-Host "Careter installed and always running. Press Ctrl+Alt+Space anywhere."
+Write-Host "Careter is installed and running. $([char]0x2713)" -ForegroundColor Green
+Write-Host "Type anywhere and pause: suggestions appear under the line."
+Write-Host ""
+Write-Host "  Tab / Enter       insert the suggestion (the grey text)"
+Write-Host "  Up / Down         choose another suggestion"
+Write-Host "  1 - 5             pick a suggestion directly"
+Write-Host "  Esc               hide the suggestions"
+Write-Host "  Backspace         right after an auto-correct: undo it"
+Write-Host "  Ctrl, Ctrl        double-tap: suggestions on / off"
+Write-Host "  Ctrl+Alt+Space    AI assistant at your cursor (add your AI key in Settings first)"
+Write-Host "  Ctrl+Alt+S        settings, help and your AI key"

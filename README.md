@@ -27,9 +27,9 @@ When the bubble opens it first says what it sees and offers 2–4 one-click next
 
 While you type anywhere, Careter suggests the next word, or the rest of the word you're typing, in a small strip at the caret:
 
-- The top suggestion appears as **grey text right after the cursor**; **Tab** inserts it. Below the line, a vertical list shows up to **5 suggestions**: **↑ / ↓** move the highlight (the grey text follows), **Tab** inserts the highlighted one, **1–5** insert one directly. After you accept, it suggests the word after that.
+- The top suggestion appears as **grey text right after the cursor**; **Tab** or **Enter** inserts it. Below the line, a vertical list shows up to **5 suggestions**: **↑ / ↓** move the highlight (the grey text follows), **Tab** or **Enter** inserts the highlighted one, **1–5** insert one directly. After you accept, it suggests the word after that.
 - Fast: word-list suggestions show about 0.1 s after you pause; if the LLM finds better ones, the list updates in place. The grey text is skipped when there's already text after the cursor on that line, or when the app doesn't report where the cursor is.
-- Keep typing or press **Esc** and the strip goes away. Number keys, arrows and Tab behave normally whenever the list isn't showing.
+- Keep typing or press **Esc** and the strip goes away. Number keys, arrows, Tab and Enter behave normally whenever the list isn't showing (press Esc first for a plain new line).
 - **Fixes while you type:** if the word you're typing looks misspelled, the list also offers what you probably meant, marked ✎ ("craet" → *created*, "becuas" → *because*). Picking one replaces what you typed.
 - **Auto-correct:** when you press space after a typo, it's fixed: famous typos ("teh" → "the", "adn" → "and"), one-letter mistakes ("recevie" → "receive"), and two-letter mistakes in words of 7+ letters ("definatly" → "definitely"), and up to three in words of 9+ letters ("aknoldgement" → "acknowledgement"). Fixes keep the first letter and aim only at common words. Press **Backspace** right after to put back what you typed; that word is then never corrected again (saved, encrypted, in `ngrams/user_words.dat`). It only touches lowercase words of 3+ letters that follow another word, so names, ACRONYMS, numbers, the first word in a box (usernames, passwords) and terminals are left alone. `CARET_AUTOCORRECT=0` turns it off.
 - **Work words:** `vocab.py` lists about 380 everyday work and tech words (bug, portal, deploy, ticket, dashboard, invoice, standup, hotfix…). When you start typing one it ranks higher (at most 2 of the 5 slots), missing ones are added, and they're never auto-corrected. Add your own in **Settings → My words** (product names, tech terms, Manglish): always offered, never corrected.
@@ -118,7 +118,7 @@ irm https://raw.githubusercontent.com/pranavmtn/careter/main/install.ps1 | iex
 curl -fsSL https://raw.githubusercontent.com/pranavmtn/careter/main/install.sh | bash
 ```
 
-No API key? Press **Enter** when the installer asks for one. Word suggestions, grey text, auto-correct and learning work without it; only the Ctrl+Alt+Space assistant needs a key, which you can add later in **Settings → AI assistant** (OpenAI, Claude or any OpenAI-compatible service).
+No API key needed: the installer doesn't ask for one. Word suggestions, grey text, auto-correct and learning work without it; only the Ctrl+Alt+Space assistant needs a key, which you add later in **Settings → AI assistant** (OpenAI, Claude or any OpenAI-compatible service). When it finishes, the installer lists the shortcuts, and Careter shows them once in a small card.
 
 ## Manual setup
 

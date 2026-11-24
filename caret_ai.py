@@ -75,12 +75,13 @@ WEB_PORT = 47822              # the Careter browser extension reports the caret 
 LEARN = os.getenv("CARET_LEARN", "1") != "0"   # learn your words & word pairs (ngrams/user_model.dat, encrypted)
 GHOST = True                  # grey completion right after the cursor
 USER_NAME = ""                # your name (Settings): the greeting, and the assistant signs drafts with it
+WELCOMED = False              # the shortcuts card was shown once (first start)
 
 # Settings window (Ctrl+Alt+S) choices are saved here and win over the defaults above.
 SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "settings.json")
 SETTINGS = {"predict": "PREDICT", "ghost": "GHOST", "count": "PREDICT_COUNT", "autocorrect": "AUTOCORRECT",
             "learn": "LEARN", "engine": "PREDICT_ENGINE", "terminals": "PREDICT_IN_TERMINALS",
-            "name": "USER_NAME"}
+            "name": "USER_NAME", "welcomed": "WELCOMED"}
 
 
 def load_settings():
@@ -1516,7 +1517,7 @@ class Predictions:
                 step = -1 if vk == 0x26 else 1
                 self.app.q.put(lambda: self.move(step))
                 self.kb.suppress_event()
-            if vk == 0x09 and plain:                  # Tab: the highlighted one (= the grey text)
+            if vk in (0x09, 0x0D) and plain:          # Tab / Enter: the highlighted one (= the grey text)
                 pick = min(self.sel, len(self.shown) - 1)
             elif plain:
                 n = len(self.shown)
@@ -2084,12 +2085,12 @@ Careter runs quietly in the background. You don't open it: just type anywhere (N
 ## Word suggestions
 • Type a few words and pause for a moment. A small dark list appears under the line with up to 5 suggestions.
 • The highlighted suggestion also appears as grey text right after your cursor.
-• Tab: insert the grey text. Then it suggests the next word, so you can keep pressing Tab.
+• Tab or Enter: insert the grey text. Then it suggests the next word, so you can keep going.
 • ↑ / ↓: choose another suggestion (the grey text follows).
 • 1 – 5: insert that suggestion directly. You can also click it.
 • Esc, or just keep typing: hide the list.
 • At the start of a sentence, type the first letter and suggestions appear.
-• While the list is showing, ↑ ↓, Tab and 1–5 belong to Careter; the rest of the time they work as usual.
+• While the list is showing, ↑ ↓, Tab, Enter and 1–5 belong to Careter; the rest of the time they work as usual (press Esc first if you want a new line).
 • No grey text? Some apps don't tell Windows where the cursor is. The list still appears (at the mouse), just without grey text.
 
 ## Auto-correct
@@ -2110,7 +2111,7 @@ Careter runs quietly in the background. You don't open it: just type anywhere (N
 • What it learns stays on this PC, encrypted. Settings tab → Learning: export it or forget everything.
 
 ## Keys at a glance
-• Tab: insert the grey text
+• Tab or Enter: insert the grey text
 • ↑ ↓: choose   ·   1–5: pick   ·   Esc: hide the list
 • Backspace right after a correction: undo it
 • Double-tap Ctrl or Ctrl+Alt+P: suggestions on / off
@@ -2125,7 +2126,7 @@ HELP_INSTALL = r"""# Install on Windows
 1. Open PowerShell: press the Windows key, type PowerShell, press Enter.
 2. Paste this line and press Enter:
 $ irm https://raw.githubusercontent.com/pranavmtn/careter/main/install.ps1 | iex
-3. When it asks for an API key, paste one, or just press Enter to skip. Word suggestions, grey text and auto-correct work without a key; only the Ctrl+Alt+Space assistant needs one (add or change it any time in Settings → AI assistant: OpenAI, Claude and others work).
+3. That's all: no API key needed. Word suggestions, grey text and auto-correct work without one; only the Ctrl+Alt+Space assistant needs a key, which you add any time in Settings → AI assistant (OpenAI, Claude and others work).
 That's it: Careter starts now and every time you sign in. Press Ctrl+Alt+S to see this window.
 
 ## Update to the newest version
@@ -2251,6 +2252,76 @@ SHARE_OPEN = {
 }
 
 
+SHORTCUTS = [
+    ("Tab  or  Enter", "insert the suggestion (the grey text)"),
+    ("↑  ↓", "choose another suggestion"),
+    ("1 – 5", "pick a suggestion directly"),
+    ("Esc", "hide the suggestions"),
+    ("Backspace", "right after an auto-correct: undo it"),
+    ("Ctrl  Ctrl", "double-tap: suggestions on / off"),
+    ("Ctrl+Alt+Space", "AI assistant at your cursor"),
+    ("Ctrl+Alt+S", "settings, help and your AI key"),
+]
+
+
+class ShortcutsCard:
+    """Shown once on first start (and from Settings → Home): Careter is running, and these are the keys."""
+
+    def __init__(self, app, first=False):
+        global WELCOMED
+        self.app = app
+        win = self.win = tk.Toplevel(app.root)
+        win.overrideredirect(True)
+        win.attributes("-topmost", True)
+        win.configure(bg=S_LINE)
+        box = tk.Frame(win, bg=S_BG, padx=20, pady=16)
+        box.pack(padx=1, pady=1)
+        tk.Label(box, text="Careter is running ✓" if first else "Careter shortcuts", bg=S_BG, fg=S_FG,
+                 font=(S_FONT[0], S_FONT[1] + 4, "bold"), anchor="w").pack(fill="x")
+        tk.Label(box, text=TAGLINE + " Type anywhere and pause: suggestions appear under the line.",
+                 bg=S_BG, fg=S_MUTED, font=S_SMALL, anchor="w", justify="left", wraplength=380).pack(fill="x", pady=(2, 10))
+        grid = tk.Frame(box, bg=S_BG)
+        grid.pack(fill="x")
+        for i, (keys, what) in enumerate(SHORTCUTS):
+            tk.Label(grid, text=keys, bg=S_FIELD, fg=S_FG, font=(S_FONT[0], S_FONT[1] - 1, "bold"),
+                     padx=8, pady=2).grid(row=i, column=0, sticky="w", pady=2)
+            tk.Label(grid, text=what, bg=S_BG, fg=S_FG, font=S_SMALL, anchor="w").grid(row=i, column=1, sticky="w",
+                                                                                     padx=(10, 0))
+        if not has_ai_key():
+            tk.Label(box, text="The AI assistant needs a key: add it any time in Ctrl+Alt+S → Settings → AI assistant.",
+                     bg=S_BG, fg=S_MUTED, font=S_SMALL, anchor="w", justify="left", wraplength=380).pack(fill="x", pady=(10, 0))
+        row = tk.Frame(box, bg=S_BG)
+        row.pack(fill="x", pady=(14, 0))
+        tk.Button(row, text="Got it", command=self.close, bg=S_DARK, fg="#ffffff", activebackground="#374151",
+                  activeforeground="#ffffff", relief="flat", bd=0, font=S_BOLD, padx=16, pady=5,
+                  cursor="hand2").pack(side="right")
+        tk.Button(row, text="Open settings", command=lambda: (self.close(), app.open_settings()), bg=S_FIELD,
+                  fg=S_FG, activebackground=S_LINE, relief="flat", font=S_FONT, padx=12, pady=4,
+                  cursor="hand2").pack(side="right", padx=8)
+        win.bind("<Escape>", lambda e: self.close())
+        win.update_idletasks()
+        w, h = win.winfo_reqwidth(), win.winfo_reqheight()
+        sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
+        win.geometry(f"+{sw - w - 24}+{sh - h - 72}")        # bottom-right, above the taskbar
+        if IS_WIN:
+            win.after(10, lambda: round_window(app_hwnd(win), S_LINE))
+        win.focus_force()
+        if first:
+            WELCOMED = True
+            save_settings()
+
+    def close(self):
+        try:
+            self.win.destroy()
+        except tk.TclError:
+            pass
+
+
+def app_hwnd(win):
+    import ctypes
+    return ctypes.windll.user32.GetAncestor(win.winfo_id(), 2)
+
+
 class SettingsWindow:
     """Careter Settings (Ctrl+Alt+S): tabs for the switches, a how-to for new users, install and update
     steps, and the live log."""
@@ -2351,6 +2422,7 @@ class SettingsWindow:
         self.button(row, "Settings", lambda: self.show_tab("Settings")).pack(side="left", padx=8)
         self.button(row, "Install & update", lambda: self.show_tab("Install & update")).pack(side="left")
         self.button(row, "Share Careter", lambda: self.show_tab("Share")).pack(side="left", padx=8)
+        self.button(row, "Shortcuts", lambda: ShortcutsCard(self.app)).pack(side="left")
         tk.Label(row, text="Ctrl+Alt+S opens this window", bg=S_BG, fg=S_MUTED, font=S_SMALL).pack(side="right")
         privacy = tk.Frame(page, bg=S_SOFT, highlightthickness=1, highlightbackground=S_LINE, padx=14, pady=10)
         privacy.pack(fill="x", pady=(10, 0))
@@ -2833,10 +2905,13 @@ class App:
             threading.Thread(target=windows_hotkey_loop, args=(hotkeys,), daemon=True).start()
         else:
             keyboard.GlobalHotKeys({HOTKEY: self.on_hotkey}).start()
-        print(f"Careter running ({MODEL}). Press {HOTKEY} anywhere. Ctrl+C here to quit.")
+        print(f"Careter running ({MODEL if has_ai_key() else 'no AI key yet'}). Press {HOTKEY} anywhere. "
+              "Ctrl+C here to quit.")
+        if not WELCOMED:
+            self.root.after(1500, lambda: ShortcutsCard(self, first=True))
         if self.predictions:
             print(f"Word prediction: {'on' if PREDICT else 'off'} ({PREDICT_HOTKEY} toggles). "
-                  "Tab takes the grey text, up/down choose, 1-5 pick directly. Settings: Ctrl+Alt+S.")
+                  "Tab/Enter take the suggestion, up/down choose, 1-5 pick directly. Settings: Ctrl+Alt+S.")
 
     def listen_commands(self, lock):
         """The single-instance lock socket also takes commands from `caret_ai.py --settings`."""

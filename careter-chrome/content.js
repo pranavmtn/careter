@@ -357,7 +357,7 @@
         e.preventDefault(); e.stopPropagation(); move(e.key === "ArrowDown" ? 1 : -1); return;
       }
       const m = /^(?:Digit|Numpad)([1-5])$/.exec(e.code);
-      const i = m ? +m[1] - 1 : e.key === "Tab" ? sel : -1;
+      const i = m ? +m[1] - 1 : (e.key === "Tab" || e.key === "Enter") ? sel : -1;
       if (i >= 0 && i < shown.length) { e.preventDefault(); e.stopPropagation(); accept(i); return; }
     }
     if (e.key === "Escape") { hide(); return; }
