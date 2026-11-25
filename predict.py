@@ -566,7 +566,8 @@ class Speller:
             return None
         if word in BOOST:
             return None                                 # an everyday work word (vocab.py)
-        if self.user_model and (self.user_model.count(word) >= 3 or word in self.user_model.mine):
+        if self.user_model and (self.user_model.count(word) >= 3 or word in self.user_model.mine
+                                or word in getattr(self.user_model, "mang_words", ())):
             return None                                 # you type this word a lot, or added it: it's yours
         if word in COMMON_TYPOS:
             return COMMON_TYPOS[word]
@@ -715,6 +716,7 @@ class UserModel:
         self.path, self.legacy, self.dirty = path, legacy, False
         self.lock = threading.Lock()
         self.uni, self.bi, self.mine = {}, {}, set()
+        self.mang_words, self.mang_order, self.mang_pairs = set(), [], {}   # Manglish (Settings), not learned
         raw, from_legacy = read_private(path, legacy)
         if raw:
             data = json.loads(raw.decode("utf-8"))
@@ -751,6 +753,23 @@ class UserModel:
         with self.lock:
             self.mine = {w.lower() for w in words if w.strip()}
             self.dirty = True
+
+    def set_manglish(self, text):
+        """Settings → Manglish: comma-separated words and phrases (see vocab.MANGLISH_DEFAULT)."""
+        from vocab import manglish_index
+        words, pairs, _ = manglish_index(text)
+        with self.lock:
+            self.mang_order, self.mang_words, self.mang_pairs = words, set(words), pairs
+
+    def manglish(self, prev, p, n=2):
+        """Manglish words for this spot: the next word of a phrase you started ("pinne " -> kaanam), then
+        Manglish words starting with what you typed (2+ letters), the ones you use most first."""
+        with self.lock:
+            out = [w for w in self.mang_pairs.get(prev, []) if len(w) > len(p) and w.startswith(p)]
+            if len(p) >= 2:
+                done = [w for w in self.mang_order if len(w) > len(p) and w.startswith(p) and w not in out]
+                out += sorted(done, key=lambda w: -self.uni.get(w, 0))
+            return [w for w in out if w not in NAMES][:n]
 
     def suggest(self, prev, p, n):
         """Your own likely words: after `prev` (seen 2+ times), then your added words and completions of
@@ -810,9 +829,23 @@ class PersonalPredictor:
             out.append(item)
             seen.add(item[0].lower())
         personal = len(out)
+        # Manglish: right after a Manglish word, its phrase / Manglish words come first; otherwise one
+        # Manglish completion takes the last slot (so English typing isn't crowded out)
+        mang = [w for w in getattr(self.user, "manglish", lambda *a: [])(prev, partial.lower(), 2)
+                if shape(w, partial, start)[0].lower() not in seen]
+        mang_ctx = prev in getattr(self.user, "mang_words", ())
+        if mang and mang_ctx:
+            for w in mang:
+                item = shape(w, partial, start)
+                out.append(item)
+                seen.add(item[0].lower())
+            mang = []
         for item in words:
             if item[0].lower() not in seen and len(out) < n:
                 out.append(item)
                 seen.add(item[0].lower())
+        if mang and n > 1:
+            item = shape(mang[0], partial, start)
+            out = out[: n - 1] + [item]         # the last slot
         self.last = f"you({personal})+{base_last}" if personal else base_last
-        return out
+        return out[:n]

@@ -79,6 +79,8 @@ ENTER_PICKS = True            # Enter inserts the highlighted suggestion (like T
 MY_WORDS_FIRST = True         # your most used words (typed 2+ times) come first and may fill the whole list
 USER_NAME = ""                # your name (Settings): the greeting, and the assistant signs drafts with it
 WELCOMED = False              # the shortcuts card was shown once (first start)
+from vocab import MANGLISH_DEFAULT
+MANGLISH = " ".join(MANGLISH_DEFAULT.split())   # Manglish words & phrases (Settings → Manglish), comma-separated
 REWRITE_STYLE = ""            # Ctrl+Alt+R: how you write, in your words (e.g. "Indian English, friendly, short")
 REWRITE_MY_WORDS = True       # Ctrl+Alt+R also sends your 40 most used single words, so it sounds like you
 
@@ -87,7 +89,7 @@ SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "settin
 SETTINGS = {"predict": "PREDICT", "ghost": "GHOST", "count": "PREDICT_COUNT", "autocorrect": "AUTOCORRECT",
             "learn": "LEARN", "engine": "PREDICT_ENGINE", "terminals": "PREDICT_IN_TERMINALS",
             "name": "USER_NAME", "welcomed": "WELCOMED", "enter": "ENTER_PICKS", "mine_first": "MY_WORDS_FIRST",
-            "style": "REWRITE_STYLE", "rewrite_words": "REWRITE_MY_WORDS"}
+            "style": "REWRITE_STYLE", "manglish": "MANGLISH", "rewrite_words": "REWRITE_MY_WORDS"}
 
 
 def load_settings():
@@ -1477,6 +1479,7 @@ class Predictions:
                 from predict import PersonalPredictor, UserModel
                 self.user_model = UserModel(os.path.join(folder, "user_model.dat"),
                                             legacy=os.path.join(folder, "user_model.json"))
+                self.user_model.set_manglish(MANGLISH)
                 personal = lambda engine: PersonalPredictor(engine, self.user_model, mine=self.mine_slots())
                 self.predictor = self.fast_predictor = personal(ngram)
                 threading.Thread(target=self.autosave, daemon=True).start()
@@ -2280,6 +2283,7 @@ Careter runs quietly in the background. You don't open it: just type anywhere (N
 ## It learns from you
 • Words and phrases you use often move to the top of the list ("Suggest my most used words first", on by default). Settings → Learning shows your most used words. Personal names are never suggested or learned.
 • Typed a different word than the ones it showed? That word counts double, so it's suggested first the next time.
+• Manglish: words like sheri, adipoli, machane and phrases like "pinne kaanam" are built in. They're suggested as you type and never auto-corrected. Add your own in Settings → Manglish.
 • What it learns stays on this PC, encrypted. Settings tab → Learning: export it or forget everything.
 
 ## Keys at a glance
@@ -2754,6 +2758,21 @@ class SettingsWindow:
         row.pack(fill="x")
         self.button(row, "Save my words", self.save_mine, primary=True).pack(side="left")
 
+        header("Manglish")
+        tk.Label(page, text="Manglish words and phrases, separated by commas. Words are suggested when you start "
+                 "typing them and never auto-corrected; phrases suggest the next word (\"pinne\" → kaanam). "
+                 "Add your own any time. Needs learning on (below).",
+                 bg=S_BG, fg=S_MUTED, font=S_SMALL, anchor="w", justify="left", wraplength=640).pack(fill="x")
+        self.mang_text = tk.Text(page, height=6, width=70, bg=S_SOFT, fg=S_FG, insertbackground=S_FG,
+                                 relief="flat", font=S_FONT, wrap="word", highlightthickness=1,
+                                 highlightbackground=S_LINE, highlightcolor=S_DARK)
+        self.mang_text.insert("1.0", MANGLISH)
+        self.mang_text.pack(fill="x", pady=(4, 4))
+        row = tk.Frame(page, bg=S_BG)
+        row.pack(fill="x")
+        self.button(row, "Save Manglish", self.save_manglish, primary=True).pack(side="left")
+        self.button(row, "Reset to the starting list", self.reset_manglish).pack(side="left", padx=8)
+
         header("Learning  (stays on this PC, encrypted)")
         switch("learn", "Learn my words and phrases", LEARN)
         switch("mine_first", "Suggest my most used words first", MY_WORDS_FIRST, "(words you've typed 2+ times)")
@@ -2781,6 +2800,27 @@ class SettingsWindow:
         with um.lock:
             top = sorted(um.uni.items(), key=lambda kv: -kv[1])[:30]
         self.top_words.configure(text="   ".join(f"{w} ({c})" for w, c in top))
+
+    def save_manglish(self, text=None):
+        global MANGLISH
+        if text is None:
+            text = self.mang_text.get("1.0", "end")
+        items = [" ".join(p.split()) for p in re.split(r"[,;\n]+", text) if p.strip()]
+        MANGLISH = ", ".join(items)
+        save_settings()
+        pred = self.app.predictions
+        if pred and pred.user_model:
+            pred.user_model.set_manglish(MANGLISH)
+            self.say(f"Saved {len(items)} Manglish words and phrases.")
+        else:
+            self.say("Saved. Turn on learning (and restart) to use them.")
+        log(f"settings: manglish saved ({len(items)})")
+
+    def reset_manglish(self):
+        text = " ".join(MANGLISH_DEFAULT.split())
+        self.mang_text.delete("1.0", "end")
+        self.mang_text.insert("1.0", text)
+        self.save_manglish(text)
 
     def save_style(self):
         global REWRITE_STYLE

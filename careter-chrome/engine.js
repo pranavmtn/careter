@@ -140,6 +140,20 @@ class NGram {
   }
 }
 
+// Manglish words & phrases (same list as the desktop app's vocab.py). Words are offered as you type
+// and never auto-corrected; phrases suggest the next word ("pinne " -> kaanam).
+const MANGLISH = ["sughamano", "sugham", "enthokke undu", "enthaa", "evide", "eppo", "aara", "enthina", "engane", "sheri", "aa", "aanu", "alla", "illa", "undu", "nanni", "pinne kaanam", "poyitt varaam", "machane", "machaa", "aliya", "chetta", "chechi", "mone", "mole", "pwoli", "kidu", "polichu", "adipoli", "scene illa", "scene aanu", "vibe aanu", "thallu", "thalli marikkal", "chali", "mass", "kalippu", "kalli", "pani kitti", "seen aakki", "ayyo", "ente ponno", "mathi", "vende", "venam", "pettennu", "pathukke", "njan varaam", "njan busy aanu", "call cheyyam", "message ayakk", "ready aayo", "ithu set aanu", "tension adikkanda", "free aano", "food kazhicho", "late aakum", "pinne paranja mathi", "onnum manasilayilla", "enikk ariyilla", "kuzhappam illa", "vere level", "download cheyyu", "share cheyyam", "delete cheythu", "kollaam", "ponnu", "chunk", "muthe", "kutta", "eda", "edi", "aashaan", "uncle", "aunty", "kashtam", "bore aanu", "ozhivu", "pokkam", "vaa", "po", "nokk", "para", "kelk", "irikk", "kazhikk", "kudikk", "urangu", "ezhunnelkk", "sathyam", "vishwasikk", "ishtam", "pedi", "sankadam", "santhosham", "poli sanam", "thakarthu", "kalakki", "pottan", "mandan", "kozhi", "kaasu", "panam", "vandi", "veedu", "chaya", "choru", "vellam", "mazha", "choodu", "thanupp"];
+const MANG_ORDER = [], MANG_PAIRS = {};
+for (const p of MANGLISH) {
+  const ws = p.match(/[a-z']+/g) || [];
+  for (const w of ws) if (!MANG_ORDER.includes(w)) MANG_ORDER.push(w);
+  for (let i = 0; i + 1 < ws.length; i++) {
+    const n = (MANG_PAIRS[ws[i]] = MANG_PAIRS[ws[i]] || []);
+    if (!n.includes(ws[i + 1])) n.push(ws[i + 1]);
+  }
+}
+const MANG_WORDS = new Set(MANG_ORDER);
+
 // Words and word pairs YOU type. Plain object so it can be saved in chrome.storage.
 class UserModel {
   constructor(data) {
@@ -170,6 +184,15 @@ class UserModel {
     }
     return out.slice(0, n);
   }
+  manglish(prev, p, n = 2) {
+    const out = (MANG_PAIRS[prev] || []).filter((w) => w.length > p.length && w.startsWith(p));
+    if (p.length >= 2) {
+      const more = MANG_ORDER.filter((w) => w.length > p.length && w.startsWith(p) && !out.includes(w));
+      more.sort((a, b) => (this.uni[b] || 0) - (this.uni[a] || 0));
+      out.push(...more);
+    }
+    return out.filter((w) => !NAMES.has(w)).slice(0, n);
+  }
   count(w) { return this.uni[w] || 0; }
   toJSON() {
     let pairs = this.bi;
@@ -196,8 +219,15 @@ function personalPredict(ngram, user, text, n = 5, mine = 5) {     // your most 
     const item = shape(w, ctx.partial, ctx.start);
     out.push(item); seen.add(item[0].toLowerCase());
   }
+  // Manglish: right after a Manglish word its phrase comes first; otherwise one takes the last slot
+  let mang = user.manglish(ctx.prev, ctx.partial.toLowerCase(), 2).filter((w) => !seen.has(w));
+  if (mang.length && MANG_WORDS.has(ctx.prev)) {
+    for (const w of mang) { const item = shape(w, ctx.partial, ctx.start); out.push(item); seen.add(item[0].toLowerCase()); }
+    mang = [];
+  }
   for (const item of base) if (!seen.has(item[0].toLowerCase()) && out.length < n) { out.push(item); seen.add(item[0].toLowerCase()); }
-  return out;
+  if (mang.length && n > 1) return [...out.slice(0, n - 1), shape(mang[0], ctx.partial, ctx.start)];
+  return out.slice(0, n);
 }
 
 // ---------------------------------------------------------------- spelling
@@ -243,7 +273,7 @@ class Speller {
   }
   correct(word, prev) {
     if (!/^[a-z]+$/.test(word)) return null;          // lowercase letters only: no names, ACRONYMS, numbers
-    if (BOOST.has(word)) return null;                // an everyday work word
+    if (BOOST.has(word) || MANG_WORDS.has(word)) return null;   // an everyday work word, or Manglish
     if (this.user && (this.user.keep.has(word) || this.user.count(word) >= 3)) return null;
     if (COMMON_TYPOS[word]) return COMMON_TYPOS[word];
     if (word.length < 3) return null;

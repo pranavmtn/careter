@@ -35,3 +35,39 @@ stakeholder stakeholders deliverable deliverables scope estimate estimates invoi
 whatsapp telegram slack teams zoom gmail outlook calendar invite invitation reschedule postpone
 followup reminder discussed discussion clarify clarification regarding attached forwarding
 """.split())
+
+
+# Manglish (Malayalam typed in English letters). Words are offered when you start typing them and never
+# auto-corrected; phrases teach the next word ("pinne " offers "kaanam"). Settings → Manglish edits this
+# list (it's saved in settings.json); this is the starting list. Separate entries with commas.
+MANGLISH_DEFAULT = """
+Sughamano, Sugham, Enthokke undu, Enthaa, Evide, Eppo, Aara, Enthina, Engane, Sheri, Aa, Aanu,
+Alla, Illa, Undu, Nanni, Pinne kaanam, Poyitt varaam, Machane, Machaa, Aliya, Chetta, Chechi,
+Mone, Mole, Pwoli, Kidu, Polichu, Adipoli, Scene illa, Scene aanu, Vibe aanu, Thallu,
+Thalli marikkal, Chali, Mass, Kalippu, Kalli, Pani kitti, Seen aakki, Ayyo, Ente ponno, Mathi,
+Vende, Venam, Pettennu, Pathukke, Njan varaam, Njan busy aanu, Call cheyyam, Message ayakk,
+Ready aayo, Ithu set aanu, Tension adikkanda, Free aano, Food kazhicho, Late aakum,
+Pinne paranja mathi, Onnum manasilayilla, Enikk ariyilla, Kuzhappam illa, Vere level,
+Download cheyyu, Share cheyyam, Delete cheythu, Kollaam, Ponnu, Chunk, Muthe, Kutta, Eda, Edi,
+Aashaan, Uncle, Aunty, Kashtam, Bore aanu, Ozhivu, Pokkam, Vaa, Po, Nokk, Para, Kelk, Irikk,
+Kazhikk, Kudikk, Urangu, Ezhunnelkk, Sathyam, Vishwasikk, Ishtam, Pedi, Sankadam, Santhosham,
+Poli sanam, Thakarthu, Kalakki, Pottan, Mandan, Kozhi, Kaasu, Panam, Vandi, Veedu, Chaya, Choru,
+Vellam, Mazha, Choodu, Thanupp
+"""
+
+
+def manglish_index(text):
+    """'Pinne kaanam, Sheri' -> (all words, {word: [next words]}, phrases in order)."""
+    import re
+    phrases = [" ".join(p.lower().split()) for p in re.split(r"[,;\n]+", text or "") if p.strip()]
+    words, pairs = [], {}
+    for p in phrases:
+        ws = [w for w in re.findall(r"[a-z']+", p)]
+        for w in ws:
+            if w not in words:
+                words.append(w)
+        for a, b in zip(ws, ws[1:]):
+            nxt = pairs.setdefault(a, [])
+            if b not in nxt:
+                nxt.append(b)
+    return words, pairs, phrases
