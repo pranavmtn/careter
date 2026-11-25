@@ -19,7 +19,7 @@ The assistant reads about 100 words before and after the cursor (widened to whol
 
 ### Rewrite in your style: Ctrl+Alt+R
 
-Select some text (or just put the cursor on a line) and press **Ctrl+Alt+R**. It's replaced in place by a cleaner version that still sounds like you: same tone, same variety of English (Indian English stays Indian English), and Manglish or mixed languages stay mixed. **Ctrl+Z** brings your original back. Describe how you write in **Settings → Rewrite** (for example "Indian English, friendly, short sentences"). It also sends your 40 most used words so it picks the words you'd pick, and a switch there turns that off. It uses the same AI key as the assistant. If you switch windows while it's working, the rewrite goes to the clipboard instead of being pasted.
+Select some text (or just put the cursor on a line) and press **Ctrl+Alt+R**. With no popup, it's replaced in place by a cleaner version that still sounds like you: same tone, same variety of English (Indian English stays Indian English), and Manglish or mixed languages stay mixed. **Ctrl+Z** brings your original back. Describe how you write in **Settings → Rewrite** (for example "Indian English, friendly, short sentences"). It also sends your 40 most used words so it picks the words you'd pick, and a switch there turns that off. It uses the same AI key as the assistant. If you switch windows while it's working, the rewrite goes to the clipboard instead of being pasted. If nothing happens (no AI key, nothing selected…), Settings → Log says why.
 
 ## What it reads
 

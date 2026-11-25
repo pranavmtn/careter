@@ -2272,7 +2272,7 @@ Careter runs quietly in the background. You don't open it: just type anywhere (N
 • Only the assistant and rewrite use that key; word suggestions run on this PC and never send anything anywhere.
 
 ## Rewrite in your style (Ctrl+Alt+R)
-• Select some text and press Ctrl+Alt+R: it's replaced by a cleaner version that still sounds like you (same tone, same English, same Manglish). With nothing selected it rewrites the line the cursor is on.
+• Select some text and press Ctrl+Alt+R: no popup, it's simply replaced by a cleaner version that still sounds like you (same tone, same English, same Manglish). With nothing selected it rewrites the line the cursor is on.
 • Ctrl+Z puts your original back.
 • Tell it how you write in Settings → Rewrite (e.g. "Indian English, friendly, short sentences"). It also uses your most used words, so it picks the words you'd pick.
 • It uses the same AI key as the assistant. It sends only the text you're rewriting (and your 40 most used words, which you can turn off).
@@ -2722,7 +2722,8 @@ class SettingsWindow:
 
         header("Rewrite  (Ctrl+Alt+R)")
         tk.Label(page, text="Select text (or just put the cursor on a line) and press Ctrl+Alt+R: it's rewritten "
-                 "in your own style, in place. Ctrl+Z undoes. Uses the AI key above.",
+                 "in your own style, in place, with no popup. Ctrl+Z undoes. Uses the AI key above (if nothing "
+                 "happens, see the Log tab).",
                  bg=S_BG, fg=S_MUTED, font=S_SMALL, anchor="w", justify="left", wraplength=640).pack(fill="x")
         row = tk.Frame(page, bg=S_BG)
         row.pack(fill="x", pady=2)
@@ -3226,7 +3227,8 @@ class App:
         self.q.put(lambda: pred.flash(text, point, ms))
 
     def on_rewrite(self):
-        """Ctrl+Alt+R: rewrite the selected text (or the current line) in your own style, in place."""
+        """Ctrl+Alt+R: rewrite the selected text (or the current line) in your own style, in place.
+        Silent: no popup or note at all; problems go to Settings → Log."""
         now = time.time()
         if getattr(self, "rewriting", False) or now - getattr(self, "last_rewrite", 0) < 0.8:
             return
@@ -3236,12 +3238,12 @@ class App:
             if self.predictions:
                 self.predictions.reset()
             if not has_ai_key() or client is None:
-                self.note("Rewrite needs an AI key: Ctrl+Alt+S → Settings → AI assistant", 3500)
+                log("rewrite: Rewrite needs an AI key: Ctrl+Alt+S → Settings → AI assistant")
                 return
             wait_for_hotkey_release(vks=(0x11, 0x12, 0x52))
             hwnd, proc = foreground_window()
             if IS_WIN and proc in TERMINALS:
-                self.note("Rewrite doesn't work in terminals")
+                log("rewrite: Rewrite doesn't work in terminals")
                 return
             text = grab_selection(proc)
             if not text.strip():                       # nothing selected: take the line you're on
@@ -3252,14 +3254,13 @@ class App:
                 selected_line = bool(text.strip())
             if not text.strip():
                 send_hotkey("end")
-                self.note("Select some text first (or put the cursor on a line), then Ctrl+Alt+R")
+                log("rewrite: Select some text first (or put the cursor on a line), then Ctrl+Alt+R")
                 return
             if len(text) > 6000:
                 send_hotkey("right")
-                self.note("That's too long to rewrite at once: select a paragraph or two")
+                log("rewrite: That's too long to rewrite at once: select a paragraph or two")
                 return
             log(f"rewrite: {len(text)} chars in {proc}")   # never the text itself
-            self.note("✎ Rewriting in your style…", 15000)
             top = []
             um = self.predictions.user_model if (self.predictions and REWRITE_MY_WORDS and LEARN) else None
             if um:
@@ -3270,17 +3271,17 @@ class App:
             log(f"rewrite: done in {time.time() - t0:.1f}s")
             if IS_WIN and foreground_window()[0] != hwnd:     # you moved on: don't paste into another window
                 pyperclip.copy(new)
-                self.note("You switched windows, so the rewrite is on the clipboard: Ctrl+V to paste", 4000)
+                log("rewrite: You switched windows, so the rewrite is on the clipboard: Ctrl+V to paste")
                 return
             if self.predictions:
                 self.predictions.reset()
             paste(new)                                 # replaces the selection; Ctrl+Z undoes it
-            self.note("✓ Rewritten  ·  Ctrl+Z undoes it", 2500)
+            log("rewrite: pasted (Ctrl+Z undoes it)")
         except Exception as e:
             log("rewrite failed:\n" + traceback.format_exc())
             if selected_line:
                 send_hotkey("end")
-            self.note(f"Rewrite failed: {str(e)[:80]}", 4000)
+            log(f"rewrite: failed: {str(e)[:80]}")
         finally:
             self.rewriting = False
 
