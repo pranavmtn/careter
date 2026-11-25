@@ -79,12 +79,15 @@ ENTER_PICKS = True            # Enter inserts the highlighted suggestion (like T
 MY_WORDS_FIRST = True         # your most used words (typed 2+ times) come first and may fill the whole list
 USER_NAME = ""                # your name (Settings): the greeting, and the assistant signs drafts with it
 WELCOMED = False              # the shortcuts card was shown once (first start)
+REWRITE_STYLE = ""            # Ctrl+Alt+R: how you write, in your words (e.g. "Indian English, friendly, short")
+REWRITE_MY_WORDS = True       # Ctrl+Alt+R also sends your 40 most used single words, so it sounds like you
 
 # Settings window (Ctrl+Alt+S) choices are saved here and win over the defaults above.
 SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "settings.json")
 SETTINGS = {"predict": "PREDICT", "ghost": "GHOST", "count": "PREDICT_COUNT", "autocorrect": "AUTOCORRECT",
             "learn": "LEARN", "engine": "PREDICT_ENGINE", "terminals": "PREDICT_IN_TERMINALS",
-            "name": "USER_NAME", "welcomed": "WELCOMED", "enter": "ENTER_PICKS", "mine_first": "MY_WORDS_FIRST"}
+            "name": "USER_NAME", "welcomed": "WELCOMED", "enter": "ENTER_PICKS", "mine_first": "MY_WORDS_FIRST",
+            "style": "REWRITE_STYLE", "rewrite_words": "REWRITE_MY_WORDS"}
 
 
 def load_settings():
@@ -119,6 +122,38 @@ def has_ai_key():
 
 # The AI assistant (Ctrl+Alt+Space) needs a key; everything for typing works without one.
 client = OpenAI() if has_ai_key() else None
+
+REWRITE_SYSTEM = """You rewrite a short piece of text so it reads well but still sounds like the person who wrote it.
+- Keep their voice: their tone, how formal they are, their variety of English (e.g. Indian English stays
+  Indian English) and the words they like to use. Do not make it sound like a corporate template.
+- Fix spelling, grammar and unclear wording. Keep the meaning, names, numbers, links, code and @mentions.
+- Keep the language: if they mix languages (e.g. Malayalam or Manglish with English), keep the mix.
+- Keep line breaks, bullets and lists. Keep about the same length; do not add facts, greetings or sign-offs.
+- If it is already fine, return it with only small fixes.
+Reply with ONLY the rewritten text: no quotes, no notes, no markdown fences."""
+
+
+def rewrite_text(text, top_words=()):
+    """Ctrl+Alt+R: the AI's rewrite of text, in the user's own style. Raises on errors."""
+    style = []
+    if REWRITE_STYLE.strip():
+        style.append(f"How they describe their own writing: {REWRITE_STYLE.strip()}")
+    if top_words:
+        style.append("Words they use most (prefer these where they fit): " + ", ".join(top_words))
+    content = ("\n".join(style) + "\n\n" if style else "") + "TEXT TO REWRITE:\n" + text
+    resp = client.chat.completions.create(model=MODEL, messages=[
+        {"role": "system", "content": REWRITE_SYSTEM}, {"role": "user", "content": content}])
+    out = (resp.choices[0].message.content or "").strip()
+    out = re.sub(r"^```[a-z]*\n|\n```$", "", out).strip()
+    for a, b in (('"', '"'), ("“", "”"), ("'", "'")):     # the AI wrapped it in quotes you didn't type
+        if len(out) > 1 and out[0] == a and out[-1] == b and not text.strip().startswith(a):
+            out = out[1:-1].strip()
+    if not out:
+        raise ValueError("the AI sent back nothing")
+    lead = text[: len(text) - len(text.lstrip())]
+    trail = text[len(text.rstrip()):]
+    return lead + out + trail                      # keep the spaces / newline around the selection
+
 
 SUGGEST_SYSTEM = """You help a user who just called an assistant at their text caret.
 You get the text around the caret ("▮" marks the caret, [[ ]] marks a selection; this is only the
@@ -256,13 +291,13 @@ def paste(text):
     pyperclip.copy(old)
 
 
-def wait_for_hotkey_release(timeout=1.5):
-    """Don't send keys while the user still holds the hotkey keys."""
+def wait_for_hotkey_release(timeout=1.5, vks=(0x11, 0x12, 0x20)):
+    """Don't send keys while the user still holds the hotkey keys (default Ctrl, Alt, Space)."""
     if IS_WIN:
         import ctypes
         user32 = ctypes.windll.user32
         end = time.time() + timeout
-        while time.time() < end and any(user32.GetAsyncKeyState(vk) & 0x8000 for vk in (0x11, 0x12, 0x20)):
+        while time.time() < end and any(user32.GetAsyncKeyState(vk) & 0x8000 for vk in vks):
             time.sleep(0.02)
         time.sleep(0.05)
     else:
@@ -2172,7 +2207,7 @@ class Predictions:
             self.ghost_why("off in settings" if not GHOST else
                            "this app doesn't tell Windows where the cursor is (list shown at the mouse)")
 
-    def flash(self, text, point):
+    def flash(self, text, point, ms=1200):
         if not self.strip:
             return
         self.sel = 0
@@ -2180,7 +2215,7 @@ class Predictions:
         self.shown, self.visible, self.ghost_point = [], True, None
         self.place_strip(point)
         g = self.gen
-        self.strip.after(1200, lambda: self.gen == g and self.hide())
+        self.strip.after(ms, lambda: self.gen == g and self.hide())
 
     def hide(self):
         was = self.visible
@@ -2195,8 +2230,9 @@ class Predictions:
 
 PRIVACY_NOTE = ("Your data stays on this PC. Suggestions, auto-correct and everything Careter learns run "
                 "here and are never sent anywhere (what it learns is encrypted with your Windows login). "
-                "Only the Ctrl+Alt+Space assistant goes online: when you use it, the text around your cursor "
-                "goes to the AI service you chose in Settings, and nowhere else.")
+                "Only the Ctrl+Alt+Space assistant and Ctrl+Alt+R rewrite go online: when you use them, the text "
+                "around your cursor (rewrite: the text you're rewriting and your 40 most used words) goes to the "
+                "AI service you chose in Settings, and nowhere else.")
 
 
 HELP_HOME = """## Why Careter
@@ -2233,7 +2269,13 @@ Careter runs quietly in the background. You don't open it: just type anywhere (N
 ## The AI assistant
 • Press Ctrl+Alt+Space anywhere to open Careter's assistant at your cursor. It reads what's around the cursor, answers, and can take actions after asking you.
 • It needs an AI model and its API key: set them in the Settings tab → AI assistant, then click Save & test.
-• Only the assistant uses that key; word suggestions run on this PC and never send anything anywhere.
+• Only the assistant and rewrite use that key; word suggestions run on this PC and never send anything anywhere.
+
+## Rewrite in your style (Ctrl+Alt+R)
+• Select some text and press Ctrl+Alt+R: it's replaced by a cleaner version that still sounds like you (same tone, same English, same Manglish). With nothing selected it rewrites the line the cursor is on.
+• Ctrl+Z puts your original back.
+• Tell it how you write in Settings → Rewrite (e.g. "Indian English, friendly, short sentences"). It also uses your most used words, so it picks the words you'd pick.
+• It uses the same AI key as the assistant. It sends only the text you're rewriting (and your 40 most used words, which you can turn off).
 
 ## It learns from you
 • Words and phrases you use often move to the top of the list ("Suggest my most used words first", on by default). Settings → Learning shows your most used words. Personal names are never suggested or learned.
@@ -2246,6 +2288,7 @@ Careter runs quietly in the background. You don't open it: just type anywhere (N
 • Backspace right after a correction: undo it
 • Double-tap Ctrl or Ctrl+Alt+P: suggestions on / off
 • Ctrl+Alt+Space: AI assistant
+• Ctrl+Alt+R: rewrite the selection (or the line) in your style
 • Ctrl+Alt+S: this window
 
 ## Something not working?
@@ -2390,6 +2433,7 @@ SHORTCUTS = [
     ("Backspace", "right after an auto-correct: undo it"),
     ("Ctrl  Ctrl", "double-tap: suggestions on / off"),
     ("Ctrl+Alt+Space", "AI assistant at your cursor"),
+    ("Ctrl+Alt+R", "rewrite the selected text (or the line) in your style"),
     ("Ctrl+Alt+S  or  ⚙", "settings, help and your AI key (⚙ is on the list)"),
 ]
 
@@ -2676,6 +2720,25 @@ class SettingsWindow:
         tk.Label(row, text="saved in the .env file in the Careter folder", bg=S_BG, fg=S_MUTED,
                  font=S_SMALL).pack(side="left", padx=8)
 
+        header("Rewrite  (Ctrl+Alt+R)")
+        tk.Label(page, text="Select text (or just put the cursor on a line) and press Ctrl+Alt+R: it's rewritten "
+                 "in your own style, in place. Ctrl+Z undoes. Uses the AI key above.",
+                 bg=S_BG, fg=S_MUTED, font=S_SMALL, anchor="w", justify="left", wraplength=640).pack(fill="x")
+        row = tk.Frame(page, bg=S_BG)
+        row.pack(fill="x", pady=2)
+        tk.Label(row, text="How you write", bg=S_BG, fg=S_FG, font=S_FONT, width=14, anchor="w").pack(side="left")
+        self.style_entry = tk.Entry(row, bg=S_SOFT, fg=S_FG, insertbackground=S_FG, relief="flat", font=S_FONT,
+                                    width=44, highlightthickness=1, highlightbackground=S_LINE,
+                                    highlightcolor=S_DARK)
+        self.style_entry.insert(0, REWRITE_STYLE)
+        self.style_entry.pack(side="left", ipady=3)
+        self.style_entry.bind("<Return>", lambda e: self.save_style())
+        self.button(row, "Save", self.save_style, primary=True).pack(side="left", padx=8)
+        tk.Label(page, text="      e.g. \"Indian English, friendly, short sentences, I say 'kindly' and 'do the needful'\"",
+                 bg=S_BG, fg=S_MUTED, font=S_SMALL, anchor="w").pack(fill="x")
+        switch("rewrite_words", "Also use my 40 most used words to match my style", REWRITE_MY_WORDS,
+               "(sent with the text)")
+
         header("My words")
         tk.Label(page, text="Words you use that it should always offer and never auto-correct "
                  "(product names, tech terms, Manglish…). Separate with spaces or commas.",
@@ -2717,6 +2780,12 @@ class SettingsWindow:
         with um.lock:
             top = sorted(um.uni.items(), key=lambda kv: -kv[1])[:30]
         self.top_words.configure(text="   ".join(f"{w} ({c})" for w, c in top))
+
+    def save_style(self):
+        global REWRITE_STYLE
+        REWRITE_STYLE = " ".join(self.style_entry.get().split())[:300]
+        save_settings()
+        self.say("Saved: Ctrl+Alt+R will write like that." if REWRITE_STYLE else "Style cleared.")
 
     def save_name(self):
         global USER_NAME
@@ -2948,6 +3017,7 @@ class SettingsWindow:
 
     def changed(self, key):
         global PREDICT, GHOST, PREDICT_COUNT, AUTOCORRECT, LEARN, PREDICT_ENGINE, PREDICT_IN_TERMINALS, ENTER_PICKS, MY_WORDS_FIRST
+        global REWRITE_MY_WORDS
         pred = self.app.predictions
         if key == "count":
             PREDICT_COUNT = self.count.get()
@@ -2981,6 +3051,8 @@ class SettingsWindow:
                     self.show_restart("Learning starts after a restart.")
             elif key == "terminals":
                 PREDICT_IN_TERMINALS = v
+            elif key == "rewrite_words":
+                REWRITE_MY_WORDS = v
             elif key == "engine":
                 PREDICT_ENGINE = "llm" if v else "ngram"
                 self.show_restart("The AI model setting applies after a restart.")
@@ -3058,9 +3130,10 @@ class App:
                 hotkeys[2] = (0x2 | 0x1, ord("P"), self.predictions.toggle)    # Ctrl+Alt+P
                 self.double_ctrl = DoubleCtrl(self.predictions.toggle)         # double-tap Ctrl
             hotkeys[3] = (0x2 | 0x1, ord("S"), lambda: self.q.put(self.open_settings))  # Ctrl+Alt+S
+            hotkeys[4] = (0x2 | 0x1, ord("R"), self.on_rewrite)                  # Ctrl+Alt+R
             threading.Thread(target=windows_hotkey_loop, args=(hotkeys,), daemon=True).start()
         else:
-            keyboard.GlobalHotKeys({HOTKEY: self.on_hotkey}).start()
+            keyboard.GlobalHotKeys({HOTKEY: self.on_hotkey, "<ctrl>+<alt>+r": self.on_rewrite}).start()
         print(f"Careter running ({MODEL if has_ai_key() else 'no AI key yet'}). Press {HOTKEY} anywhere. "
               "Ctrl+C here to quit.")
         if not WELCOMED:
@@ -3137,6 +3210,79 @@ class App:
             log("hotkey failed:\n" + traceback.format_exc())
         finally:
             self.triggering = False
+
+    def note(self, text, ms=1800):
+        """A one-line note at the cursor (uses the suggestion list's window)."""
+        pred = self.predictions
+        if not pred:
+            print(text)
+            return
+        caret = caret_rect()
+        if caret:
+            point = caret
+        else:
+            x, y = pyautogui.position()
+            point = (x, y, y + 16)
+        self.q.put(lambda: pred.flash(text, point, ms))
+
+    def on_rewrite(self):
+        """Ctrl+Alt+R: rewrite the selected text (or the current line) in your own style, in place."""
+        now = time.time()
+        if getattr(self, "rewriting", False) or now - getattr(self, "last_rewrite", 0) < 0.8:
+            return
+        self.rewriting, self.last_rewrite = True, now
+        selected_line = False
+        try:
+            if self.predictions:
+                self.predictions.reset()
+            if not has_ai_key() or client is None:
+                self.note("Rewrite needs an AI key: Ctrl+Alt+S → Settings → AI assistant", 3500)
+                return
+            wait_for_hotkey_release(vks=(0x11, 0x12, 0x52))
+            hwnd, proc = foreground_window()
+            if IS_WIN and proc in TERMINALS:
+                self.note("Rewrite doesn't work in terminals")
+                return
+            text = grab_selection(proc)
+            if not text.strip():                       # nothing selected: take the line you're on
+                send_hotkey("home")
+                send_hotkey("shift", "end")
+                time.sleep(0.05)
+                text = grab_selection(proc)
+                selected_line = bool(text.strip())
+            if not text.strip():
+                send_hotkey("end")
+                self.note("Select some text first (or put the cursor on a line), then Ctrl+Alt+R")
+                return
+            if len(text) > 6000:
+                send_hotkey("right")
+                self.note("That's too long to rewrite at once: select a paragraph or two")
+                return
+            log(f"rewrite: {len(text)} chars in {proc}")   # never the text itself
+            self.note("✎ Rewriting in your style…", 15000)
+            top = []
+            um = self.predictions.user_model if (self.predictions and REWRITE_MY_WORDS and LEARN) else None
+            if um:
+                with um.lock:
+                    top = [w for w, c in sorted(um.uni.items(), key=lambda kv: -kv[1]) if c >= 2][:40]
+            t0 = time.time()
+            new = rewrite_text(text, top)
+            log(f"rewrite: done in {time.time() - t0:.1f}s")
+            if IS_WIN and foreground_window()[0] != hwnd:     # you moved on: don't paste into another window
+                pyperclip.copy(new)
+                self.note("You switched windows, so the rewrite is on the clipboard: Ctrl+V to paste", 4000)
+                return
+            if self.predictions:
+                self.predictions.reset()
+            paste(new)                                 # replaces the selection; Ctrl+Z undoes it
+            self.note("✓ Rewritten  ·  Ctrl+Z undoes it", 2500)
+        except Exception as e:
+            log("rewrite failed:\n" + traceback.format_exc())
+            if selected_line:
+                send_hotkey("end")
+            self.note(f"Rewrite failed: {str(e)[:80]}", 4000)
+        finally:
+            self.rewriting = False
 
     def open(self, *args):
         self.session = Session(self, *args)

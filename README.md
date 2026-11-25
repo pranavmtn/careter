@@ -17,6 +17,10 @@ The assistant reads about 100 words before and after the cursor (widened to whol
 
 **Esc** closes the popup. Moving the mouse into a screen corner aborts typing.
 
+### Rewrite in your style: Ctrl+Alt+R
+
+Select some text (or just put the cursor on a line) and press **Ctrl+Alt+R**. It's replaced in place by a cleaner version that still sounds like you: same tone, same variety of English (Indian English stays Indian English), and Manglish or mixed languages stay mixed. **Ctrl+Z** brings your original back. Describe how you write in **Settings → Rewrite** (for example "Indian English, friendly, short sentences"). It also sends your 40 most used words so it picks the words you'd pick, and a switch there turns that off. It uses the same AI key as the assistant. If you switch windows while it's working, the rewrite goes to the clipboard instead of being pasted.
+
 ## What it reads
 
 - **Text around the caret:** 10 characters before and after it (`CONTEXT_CHARS`). Read by moving the caret (Shift+←/→ ×10, copy, collapse back) with the clipboard restored; terminals use Windows UI Automation instead. Stays inside the current section (stops at a blank line).
@@ -84,7 +88,7 @@ For the Chrome Web Store you'd also add icons, put a prebuilt `model.json` in th
 
 ## Privacy
 
-Your data stays on your PC. Suggestions, auto-correct and everything Careter learns run locally and are never sent anywhere; what it learns is encrypted with your Windows login. The only thing that goes online is the **Ctrl+Alt+Space assistant**: when you use it, the text around your cursor is sent to the AI service you chose in Settings (OpenAI, Claude, or another), and nowhere else. On first start Careter downloads public word lists (and the small AI model, if enabled); nothing about you is uploaded.
+Your data stays on your PC. Suggestions, auto-correct and everything Careter learns run locally and are never sent anywhere; what it learns is encrypted with your Windows login. The only things that go online are the **Ctrl+Alt+Space assistant** and **Ctrl+Alt+R rewrite**: when you use them, the text around your cursor (for rewrite: the text you're rewriting, plus your 40 most used words unless you turn that off) is sent to the AI service you chose in Settings (OpenAI, Claude, or another), and nowhere else. On first start Careter downloads public word lists (and the small AI model, if enabled); nothing about you is uploaded.
 
 ## Settings
 
@@ -122,7 +126,7 @@ irm https://raw.githubusercontent.com/pranavmtn/careter/main/install.ps1 | iex
 curl -fsSL https://raw.githubusercontent.com/pranavmtn/careter/main/install.sh | bash
 ```
 
-No API key needed: the installer doesn't ask for one. Word suggestions, grey text, auto-correct and learning work without it; only the Ctrl+Alt+Space assistant needs a key, which you add later in **Settings → AI assistant** (OpenAI, Claude or any OpenAI-compatible service). When it finishes, the installer lists the shortcuts, and Careter shows them once in a small card.
+No API key needed: the installer doesn't ask for one. Word suggestions, grey text, auto-correct and learning work without it; only the Ctrl+Alt+Space assistant and Ctrl+Alt+R rewrite need a key, which you add later in **Settings → AI assistant** (OpenAI, Claude or any OpenAI-compatible service). When it finishes, the installer lists the shortcuts, and Careter shows them once in a small card.
 
 ## Manual setup
 
