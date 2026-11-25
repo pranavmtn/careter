@@ -76,6 +76,7 @@ WEB_PORT = 47822              # the Careter browser extension reports the caret 
 LEARN = os.getenv("CARET_LEARN", "1") != "0"   # learn your words & word pairs (ngrams/user_model.dat, encrypted)
 GHOST = True                  # grey completion right after the cursor
 ENTER_PICKS = True            # Enter inserts the highlighted suggestion (like Tab) while the list shows
+MY_WORDS_FIRST = True         # your most used words (typed 2+ times) come first and may fill the whole list
 USER_NAME = ""                # your name (Settings): the greeting, and the assistant signs drafts with it
 WELCOMED = False              # the shortcuts card was shown once (first start)
 
@@ -83,7 +84,7 @@ WELCOMED = False              # the shortcuts card was shown once (first start)
 SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "settings.json")
 SETTINGS = {"predict": "PREDICT", "ghost": "GHOST", "count": "PREDICT_COUNT", "autocorrect": "AUTOCORRECT",
             "learn": "LEARN", "engine": "PREDICT_ENGINE", "terminals": "PREDICT_IN_TERMINALS",
-            "name": "USER_NAME", "welcomed": "WELCOMED", "enter": "ENTER_PICKS"}
+            "name": "USER_NAME", "welcomed": "WELCOMED", "enter": "ENTER_PICKS", "mine_first": "MY_WORDS_FIRST"}
 
 
 def load_settings():
@@ -1440,7 +1441,7 @@ class Predictions:
                 from predict import PersonalPredictor, UserModel
                 self.user_model = UserModel(os.path.join(folder, "user_model.dat"),
                                             legacy=os.path.join(folder, "user_model.json"))
-                personal = lambda engine: PersonalPredictor(engine, self.user_model)
+                personal = lambda engine: PersonalPredictor(engine, self.user_model, mine=self.mine_slots())
                 self.predictor = self.fast_predictor = personal(ngram)
                 threading.Thread(target=self.autosave, daemon=True).start()
                 log(f"predict: learning on, knows {len(self.user_model.uni)} of your words")
@@ -1470,6 +1471,15 @@ class Predictions:
             log("predict: failed to load:\n" + traceback.format_exc())
         finally:
             self.loading = False
+
+    def mine_slots(self):
+        """How many of the list's slots your own most used words may take: all of them, or none."""
+        return 5 if MY_WORDS_FIRST else 0
+
+    def apply_mine_first(self):
+        for p in (self.predictor, self.fast_predictor):
+            if hasattr(p, "mine"):
+                p.mine = self.mine_slots()
 
     def autosave(self):
         import atexit
@@ -2218,7 +2228,7 @@ Careter runs quietly in the background. You don't open it: just type anywhere (N
 • Only the assistant uses that key; word suggestions run on this PC and never send anything anywhere.
 
 ## It learns from you
-• Words and phrases you use often move to the top of the list. Personal names are never suggested or learned.
+• Words and phrases you use often move to the top of the list ("Suggest my most used words first", on by default). Settings → Learning shows your most used words. Personal names are never suggested or learned.
 • What it learns stays on this PC, encrypted. Settings tab → Learning: export it or forget everything.
 
 ## Keys at a glance
@@ -2505,6 +2515,8 @@ class SettingsWindow:
             self.reload_log()
         if name == "Home":
             self.refresh_home()
+        if name == "Settings" and hasattr(self, "top_words"):
+            self.refresh_top_words()
 
     # --- tab: home
     def build_home(self, page):
@@ -2671,6 +2683,13 @@ class SettingsWindow:
 
         header("Learning  (stays on this PC, encrypted)")
         switch("learn", "Learn my words and phrases", LEARN)
+        switch("mine_first", "Suggest my most used words first", MY_WORDS_FIRST, "(words you've typed 2+ times)")
+        tk.Label(page, text="YOUR MOST USED WORDS", bg=S_BG, fg=S_MUTED, font=(S_FONT[0], S_FONT[1] - 2, "bold"),
+                 anchor="w").pack(fill="x", pady=(8, 2))
+        self.top_words = tk.Label(page, text="", bg=S_SOFT, fg=S_FG, font=S_SMALL, anchor="w", justify="left",
+                                  wraplength=630, padx=10, pady=8, highlightthickness=1, highlightbackground=S_LINE)
+        self.top_words.pack(fill="x")
+        self.refresh_top_words()
         row = tk.Frame(page, bg=S_BG)
         row.pack(fill="x", pady=(4, 0))
         self.button(row, "Export what it learned…", self.export).pack(side="left")
@@ -2679,6 +2698,16 @@ class SettingsWindow:
         switch("autostart", "Start with Windows and keep running", self.autostart_on() if IS_WIN else False)
         tk.Label(page, text="New here? See the How to use tab.", bg=S_BG, fg=S_MUTED,
                  font=S_SMALL, anchor="w").pack(fill="x", pady=(14, 4))
+
+    def refresh_top_words(self):
+        pred = self.app.predictions
+        um = pred.user_model if pred else None
+        if not um or not um.uni:
+            self.top_words.configure(text="Nothing yet: keep typing, and the words you use most will show here.")
+            return
+        with um.lock:
+            top = sorted(um.uni.items(), key=lambda kv: -kv[1])[:30]
+        self.top_words.configure(text="   ".join(f"{w} ({c})" for w, c in top))
 
     def save_name(self):
         global USER_NAME
@@ -2909,7 +2938,7 @@ class SettingsWindow:
             return False
 
     def changed(self, key):
-        global PREDICT, GHOST, PREDICT_COUNT, AUTOCORRECT, LEARN, PREDICT_ENGINE, PREDICT_IN_TERMINALS, ENTER_PICKS
+        global PREDICT, GHOST, PREDICT_COUNT, AUTOCORRECT, LEARN, PREDICT_ENGINE, PREDICT_IN_TERMINALS, ENTER_PICKS, MY_WORDS_FIRST
         pred = self.app.predictions
         if key == "count":
             PREDICT_COUNT = self.count.get()
@@ -2931,6 +2960,10 @@ class SettingsWindow:
                 GHOST = v
             elif key == "enter":
                 ENTER_PICKS = v
+            elif key == "mine_first":
+                MY_WORDS_FIRST = v
+                if pred:
+                    pred.apply_mine_first()
             elif key == "autocorrect":
                 AUTOCORRECT = v
             elif key == "learn":

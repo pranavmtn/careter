@@ -185,8 +185,8 @@ class UserModel {
   }
 }
 
-// Your habits first (up to 3 slots), then the general suggestions.
-function personalPredict(ngram, user, text, n = 5, mine = 3) {
+// Your most used words first (they may fill the list), then the general suggestions.
+function personalPredict(ngram, user, text, n = 5, mine = 5) {     // your most used words first
   const base = ngram.predict(text, n);
   const ctx = readContext(text);
   if (!ctx || !user) return base;
