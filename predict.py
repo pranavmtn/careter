@@ -732,16 +732,18 @@ class UserModel:
             return {"words": dict(self.uni), "pairs": {a: dict(d) for a, d in self.bi.items()},
                     "mine": sorted(self.mine)}
 
-    def learn(self, prev, word):
+    def learn(self, prev, word, weight=1):
+        """Count a word you finished (and the word before it). weight=2 for a word you typed instead
+        of the suggestions shown: that's enough for it to be suggested first the very next time."""
         if word in NAMES:
             return
         if prev in NAMES:
             prev = None
         with self.lock:
-            self.uni[word] = self.uni.get(word, 0) + 1
+            self.uni[word] = self.uni.get(word, 0) + weight
             if prev:
                 d = self.bi.setdefault(prev, {})
-                d[word] = d.get(word, 0) + 1
+                d[word] = d.get(word, 0) + weight
             self.dirty = True
 
     def set_mine(self, words):

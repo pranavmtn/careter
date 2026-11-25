@@ -152,11 +152,12 @@ class UserModel {
       for (const b of Object.keys(this.bi[a])) if (NAMES.has(b)) delete this.bi[a][b];
     }
   }
-  learn(prev, word) {
+  // weight 2 = a word you typed instead of the suggestions shown: suggested first the very next time
+  learn(prev, word, weight = 1) {
     if (NAMES.has(word)) return;
     if (NAMES.has(prev)) prev = null;
-    this.uni[word] = (this.uni[word] || 0) + 1;
-    if (prev) { const d = (this.bi[prev] = this.bi[prev] || {}); d[word] = (d[word] || 0) + 1; }
+    this.uni[word] = (this.uni[word] || 0) + weight;
+    if (prev) { const d = (this.bi[prev] = this.bi[prev] || {}); d[word] = (d[word] || 0) + weight; }
   }
   suggest(prev, p, n) {
     const out = [];

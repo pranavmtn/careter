@@ -1377,6 +1377,7 @@ class Predictions:
         self.epoch, self.last_exact = 0, None       # last exact caret spot in this window (for pass 1)
         self.last_seen = None                       # (window, epoch, text) read while you typed
         self.snaps = {}                             # window -> (keys typed there before a click, when)
+        self.offered = set()                        # suggestions shown while typing the current word
         self.keys_used = ("", None)                 # the typed-keys text the last prediction used
         self.user_model = None
         self.last_key_at = 0.0
@@ -1497,6 +1498,7 @@ class Predictions:
 
     def learn_last(self):
         """A word was just finished (space/enter/accepted): count it, and the word before it."""
+        offered, self.offered = getattr(self, "offered", set()), set()   # a fresh record per word
         if not LEARN or not self.user_model or self.buf_proc in TERMINALS or self.in_browser_password():
             return
         m = re.search(r"((?:[^\W\d_]|['’\-])+)\s\Z", self.buf)
@@ -1511,7 +1513,12 @@ class Predictions:
             return                             # a capitalised word mid-sentence: a name or place
         pm = re.search(r"((?:[^\W\d_]|['’\-])+)\Z", tail)
         prev = pm.group(1).lower() if (pm and not sentence_start) else None
-        self.user_model.learn(prev, word.lower().replace("’", "'"))
+        word = word.lower().replace("’", "'")
+        # typed your own word although suggestions were showing: it's yours, put it first next time
+        rejected = bool(offered) and word not in offered
+        self.user_model.learn(prev, word, weight=2 if rejected else 1)
+        if rejected:
+            log("predict: learned a word you typed instead of the suggestions")   # never the word
 
     def toggle(self):
         self.enabled = not self.enabled
@@ -1723,7 +1730,7 @@ class Predictions:
 
     def reset(self):
         self.snapshot()
-        self.buf, self.last_fix = "", None
+        self.buf, self.last_fix, self.offered = "", None, set()
         self.epoch += 1                        # the caret may have moved: forget its last position
         self.gen += 1
         if self.timer:
@@ -2149,6 +2156,7 @@ class Predictions:
 
     def _show(self, words, point, gen, exact):
         self.sel, self.shown_gen = 0, gen
+        self.offered = getattr(self, "offered", set()) | {w.lower().rstrip("  ✎") for w, _ in words}
         self.shown, self.visible = list(words), True
         items = [(w + ("  ✎" if ins.startswith("\b") else ""), str(i + 1),     # ✎ = fixes what you typed
                   lambda i=i: threading.Thread(target=self.accept, args=(self.shown[i],), daemon=True).start())
@@ -2229,6 +2237,7 @@ Careter runs quietly in the background. You don't open it: just type anywhere (N
 
 ## It learns from you
 • Words and phrases you use often move to the top of the list ("Suggest my most used words first", on by default). Settings → Learning shows your most used words. Personal names are never suggested or learned.
+• Typed a different word than the ones it showed? That word counts double, so it's suggested first the next time.
 • What it learns stays on this PC, encrypted. Settings tab → Learning: export it or forget everything.
 
 ## Keys at a glance

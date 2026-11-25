@@ -96,7 +96,7 @@ async function handle(msg) {
       return { fix: speller.correct(msg.word, msg.prev) };
     case "learn":
       await ensure();
-      user.learn(msg.prev || null, msg.word);
+      user.learn(msg.prev || null, msg.word, msg.weight === 2 ? 2 : 1);
       saveSoon();
       return {};
     case "keep":                                   // you undid a correction: never correct this word

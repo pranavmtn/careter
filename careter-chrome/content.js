@@ -9,6 +9,7 @@
   let state = { enabled: true, desktop: false, checked: 0 };
   let timer = null, shown = [], strip = null, box = null, lastFix = null;
   let sel = 0, ghost = null, ghostFor = null;
+  let offered = new Set();                           // suggestions shown while typing the current word
   let dragOffset = null, dragging = null, lastDefault = null;   // you can drag the list out of the way
   let pending = false, queued = "";                  // keys typed while a correction is being looked up
   let gen = 0;
@@ -207,6 +208,7 @@
       w.append(n, s); box.appendChild(w);
     });
     shown = words; sel = 0;
+    for (const [w] of words) offered.add(w.toLowerCase());
     paintSel();
     place(rect);
     ghostFor = { el, rect };
@@ -313,12 +315,17 @@
   }
 
   function learnFrom(textEndingInSpace) {
+    const wasOffered = offered;
+    offered = new Set();                             // a word is finished: start a fresh record
     const w = lastWord(textEndingInSpace.replace(/\s$/, ""));
     if (!w || /\d/.test(w.word)) return;
     const capital = w.word[0] !== w.word[0].toLowerCase();
     if (capital && !w.start && w.word !== "I" && !/^I['’]/.test(w.word)) return;   // a name or place
-    ask({ type: "learn", prev: w.prev, word: w.word.toLowerCase().replace("’", "'") });
+    const word = w.word.toLowerCase().replace("’", "'");
+    const rejected = wasOffered.size > 0 && !wasOffered.has(word);   // you typed your own word instead
+    ask({ type: "learn", prev: w.prev, word, weight: rejected ? 2 : 1 });
   }
+
 
   async function onSpace(e, el) {
     const before = textBefore(el);
