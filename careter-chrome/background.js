@@ -34,6 +34,7 @@ async function load() {
   ngram = new E.NGram(model);
   user = new E.UserModel(saved);
   speller = new E.Speller(ngram, user);
+  if (user.purge((w) => speller.isTypo(w))) saveSoon();   // words saved earlier that are really typos
 }
 
 function ensure() {
@@ -96,7 +97,9 @@ async function handle(msg) {
       return { fix: speller.correct(msg.word, msg.prev) };
     case "learn":
       await ensure();
-      user.learn(msg.prev || null, msg.word, msg.weight === 2 ? 2 : 1);
+      if (speller.isTypo(msg.word, msg.prev || null)) return {};   // a typo: never learn a wrong word
+      // only a real word gets the "typed instead of the suggestions" boost
+      user.learn(msg.prev || null, msg.word, msg.weight === 2 && ngram.rank.has(msg.word) ? 2 : 1);
       saveSoon();
       return {};
     case "keep":                                   // you undid a correction: never correct this word

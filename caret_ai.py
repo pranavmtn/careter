@@ -81,7 +81,7 @@ ENTER_PICKS = True            # Enter inserts the highlighted suggestion (like T
 MY_WORDS_FIRST = True         # your most used words (typed 2+ times) come first and may fill the whole list
 USER_NAME = ""                # your name (Settings): the greeting, and the assistant signs drafts with it
 WELCOMED = False              # the shortcuts card was shown once (first start)
-from vocab import MANGLISH_DEFAULT
+from vocab import BOOST, MANGLISH_DEFAULT
 MANGLISH = " ".join(MANGLISH_DEFAULT.split())   # Manglish words & phrases (Settings → Manglish), comma-separated
 REWRITE_STYLE = ""            # Ctrl+Alt+R: how you write, in your words (e.g. "Indian English, friendly, short")
 REWRITE_MY_WORDS = True       # Ctrl+Alt+R also sends your 40 most used single words, so it sounds like you
@@ -1524,6 +1524,10 @@ class Predictions:
                 from predict import Speller
                 self.speller = Speller(ngram, folder)
                 self.speller.user_model = self.user_model
+                if self.user_model:                  # words saved earlier that are really typos
+                    n = self.user_model.purge(self.speller.is_typo)
+                    if n:
+                        log(f"predict: removed {n} misspelled words it had learned")
             log(f"predict: word lists ready in {time.time() - t0:.1f}s")
             if PREDICT_ENGINE != "llm":
                 return
@@ -1588,8 +1592,13 @@ class Predictions:
         pm = re.search(r"((?:[^\W\d_]|['’\-])+)\Z", tail)
         prev = pm.group(1).lower() if (pm and not sentence_start) else None
         word = word.lower().replace("’", "'")
+        sp = getattr(self, "speller", None)
+        if sp and sp.is_typo(word, prev):
+            return                             # a typo (it wasn't fixed): never learn a wrong word
         # typed your own word although suggestions were showing: it's yours, put it first next time
-        rejected = bool(offered) and word not in offered
+        # (only a real word: one the dictionary doesn't know must prove itself by being typed again)
+        known = bool(sp and sp.rank.get(word) is not None) or word in BOOST
+        rejected = bool(offered) and word not in offered and known
         self.user_model.learn(prev, word, weight=2 if rejected else 1)
         if rejected:
             log("predict: learned a word you typed instead of the suggestions")   # never the word
@@ -1629,6 +1638,16 @@ class Predictions:
                     self.swallow_up.add(vk)
                     threading.Thread(target=job, daemon=True).start()
                     self.kb.suppress_event()   # we type the space / undo ourselves
+        if down and vk == 0x0D and self.enabled and AUTOCORRECT and self.speller and not self.fixing \
+                and not (self.visible and self.shown and ENTER_PICKS):
+            ctrl, alt, shift, win = self.mods()        # Enter after a typo: fix the word, then press Enter
+            if not (ctrl or alt or shift or win):
+                job = self.check_fix(after="\n")
+                if job:
+                    self.fixing = True
+                    self.swallow_up.add(vk)
+                    threading.Thread(target=job, daemon=True).start()
+                    self.kb.suppress_event()
         if down and self.visible and self.shown:
             ctrl, alt, shift, win = self.mods()
             pick = None
@@ -1776,8 +1795,9 @@ class Predictions:
         self.schedule()
 
     # --- auto-correct (runs inside the keyboard hook: only fast dictionary lookups here)
-    def check_fix(self):
-        """Space pressed: if the word just typed is a clear typo, return a job that replaces it."""
+    def check_fix(self, after=" "):
+        """Space (or Enter) pressed: if the word just typed is a clear typo, return a job that replaces
+        it, then types `after` (the space or the Enter we held back)."""
         if self.buf_proc in TERMINALS or self.in_browser_password():
             return None
         m = re.search(r"([^\W\d_]+)\Z", self.buf)
@@ -1810,7 +1830,7 @@ class Predictions:
         new = self.speller.correct(word, prev)
         if not new or new == word:
             return None
-        return lambda: self.apply_fix(word, new)
+        return lambda: self.apply_fix(word, new, after)
 
     def fix_why(self, reason):
         """Log why a word wasn't corrected, once per change (never the word itself)."""
@@ -1822,14 +1842,14 @@ class Predictions:
         web = getattr(self, "web", None)
         return bool(web and self.buf_proc in BROWSERS and web.recent_password())
 
-    def apply_fix(self, word, new):
+    def apply_fix(self, word, new, tail=" "):
         try:
             self.hide()
             gone = 0 if IS_WIN else 1                  # Linux: the space reached the app already
             self.injecting(len(word) + gone + len(new) + 1)
             pyautogui.press("backspace", presses=len(word) + gone, _pause=False)
-            pyautogui.write(new + " ", _pause=False)
-            self.buf = (self.buf[: -len(word)] + new + " ")[-self.BUF_MAX:]
+            pyautogui.write(new + tail, _pause=False)          # tail "\n" presses Enter
+            self.buf = (self.buf[: -len(word)] + new + tail)[-self.BUF_MAX:]
             self.last_fix = (word, new, self.buf)
             self.learn_last()
             log(f"predict: auto-corrected a {len(word)}-letter word")     # never the word itself
@@ -2464,9 +2484,10 @@ Careter runs quietly in the background. You don't open it: just type anywhere (N
 • No grey text? Some apps don't tell Windows where the cursor is. The list still appears (at the mouse), just without grey text.
 
 ## Auto-correct
-• When you press space after a typo, it's fixed: "teh" → "the", "recieve" → "receive", "definatly" → "definitely".
+• When you press space (or Enter) after a typo, it's fixed: "teh" → "the", "recieve" → "receive", "definatly" → "definitely". (Enter fixes the word first, then presses Enter; on Windows only.)
 • Press Backspace right after to put your word back. Careter remembers it and never changes it again.
 • Names, CAPITALS, numbers and the first word in a box are never changed.
+• Misspelled words are never learned: a word that looks like a typo (even a badly garbled one) isn't added to what Careter learns, and typos it learned earlier are removed when it starts.
 
 ## Turn it off for a moment
 • Double-tap Ctrl (or press Ctrl+Alt+P) to switch suggestions and auto-correct off, for example to type numbers or Manglish. Do it again to switch them back on. A small label shows which.

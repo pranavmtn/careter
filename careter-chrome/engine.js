@@ -173,6 +173,21 @@ class UserModel {
     this.uni[word] = (this.uni[word] || 0) + weight;
     if (prev) { const d = (this.bi[prev] = this.bi[prev] || {}); d[word] = (d[word] || 0) + weight; }
   }
+  // forget learned words that are really typos (isTypo(word) -> true)
+  purge(isTypo) {
+    const bad = new Set();
+    for (const w of Object.keys(this.uni)) if (isTypo(w)) bad.add(w);
+    for (const a of Object.keys(this.bi)) {
+      if (isTypo(a)) bad.add(a);
+      for (const b of Object.keys(this.bi[a])) if (isTypo(b)) bad.add(b);
+    }
+    for (const w of bad) delete this.uni[w];
+    for (const a of Object.keys(this.bi)) {
+      if (bad.has(a)) { delete this.bi[a]; continue; }
+      for (const b of Object.keys(this.bi[a])) if (bad.has(b)) delete this.bi[a][b];
+    }
+    return bad.size;
+  }
   suggest(prev, p, n) {
     const out = [];
     const after = prev ? this.bi[prev] || {} : {};
@@ -271,10 +286,24 @@ class Speller {
       this.long.get(w[0]).push([w, letterPairs(w)]);
     }
   }
-  correct(word, prev) {
+  // true if `word` is probably a typo, so it must never be learned (see predict.py Speller.is_typo)
+  isTypo(word, prev) {
+    if (this.correct(word, prev || null, false)) return true;
+    if (word.length < 9 || !/^[a-z]+$/.test(word) || BOOST.has(word) || this.ng.rank.has(word)
+        || (this.user && this.user.keep.has(word)) || MANG_WORDS.has(word)) return false;
+    const mine = letterPairs(word), lim = Math.max(3, Math.round(word.length * 0.35));
+    for (const [w, wp] of this.long.get(word[0]) || []) {
+      if (Math.abs(w.length - word.length) > lim) continue;
+      let inter = 0; for (const x of mine) if (wp.has(x)) inter++;
+      if (inter / (mine.size + wp.size - inter) < 0.25) continue;
+      if (osa(word, w) <= lim) return true;
+    }
+    return false;
+  }
+  correct(word, prev, trustLearned = true) {
     if (!/^[a-z]+$/.test(word)) return null;          // lowercase letters only: no names, ACRONYMS, numbers
     if (BOOST.has(word) || MANG_WORDS.has(word)) return null;   // an everyday work word, or Manglish
-    if (this.user && (this.user.keep.has(word) || this.user.count(word) >= 3)) return null;
+    if (this.user && (this.user.keep.has(word) || (trustLearned && this.user.count(word) >= 3))) return null;
     if (COMMON_TYPOS[word]) return COMMON_TYPOS[word];
     if (word.length < 3) return null;
     const r = this.ng.rank.get(word);

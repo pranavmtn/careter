@@ -561,12 +561,15 @@ class Speller:
         if from_legacy:
             self._save_words()
 
-    def correct(self, word, prev=None):
+    def correct(self, word, prev=None, trust_learned=True):
+        """The fix for a typo, or None. trust_learned=False ignores "you've typed it 3+ times" (used to
+        decide what NOT to learn: a typo typed a few times is still a typo)."""
         if not word.isalpha() or not word.islower() or word in self.user:
             return None
         if word in BOOST:
             return None                                 # an everyday work word (vocab.py)
-        if self.user_model and (self.user_model.count(word) >= 3 or word in self.user_model.mine
+        if self.user_model and ((trust_learned and self.user_model.count(word) >= 3)
+                                or word in self.user_model.mine
                                 or word in getattr(self.user_model, "mang_words", ())):
             return None                                 # you type this word a lot, or added it: it's yours
         if word in COMMON_TYPOS:
@@ -607,6 +610,25 @@ class Speller:
             if cands:
                 return best(cands)
         return None
+
+    def is_typo(self, word, prev=None):
+        """True if `word` is probably a typo, so it must never be learned: auto-correct would fix it
+        (however often you typed it), or it's a long word the dictionary doesn't know that is nearly a
+        common one ("aknwoldgenment"). Your own words (My words, Manglish, undone fixes) never count."""
+        if self.correct(word, prev, trust_learned=False):
+            return True
+        if (len(word) < 9 or not word.isalpha() or not word.islower() or word in self.user or word in BOOST
+                or self.rank.get(word) is not None
+                or (self.user_model and (word in self.user_model.mine
+                                         or word in getattr(self.user_model, "mang_words", ())))):
+            return False
+        mine, lim = self.pairs(word), max(3, round(len(word) * 0.35))
+        for w, wp in self.long.get(word[0], ()):
+            if abs(len(w) - len(word)) > lim or len(mine & wp) / len(mine | wp) < 0.25:
+                continue
+            if osa_distance(word, w) <= lim:
+                return True
+        return False
 
     @staticmethod
     def pairs(w):
@@ -749,6 +771,19 @@ class UserModel:
                 d = self.bi.setdefault(prev, {})
                 d[word] = d.get(word, 0) + weight
             self.dirty = True
+
+    def purge(self, is_typo):
+        """Forget learned words that are really typos (is_typo(word) -> True). Returns how many."""
+        with self.lock:
+            bad = {w for w in set(self.uni) | {b for d in self.bi.values() for b in d} | set(self.bi)
+                   if w not in self.mine and is_typo(w)}
+            if not bad:
+                return 0
+            self.uni = {w: c for w, c in self.uni.items() if w not in bad}
+            self.bi = {a: {b: c for b, c in d.items() if b not in bad}
+                       for a, d in self.bi.items() if a not in bad}
+            self.dirty = True
+            return len(bad)
 
     def set_mine(self, words):
         """Settings → My words: always suggested when you start typing them, never auto-corrected."""
