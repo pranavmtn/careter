@@ -76,6 +76,7 @@ BROWSERS = {"chrome.exe", "msedge.exe", "brave.exe", "vivaldi.exe", "opera.exe",
 WEB_PORT = 47822              # the Careter browser extension reports the caret here (127.0.0.1 only)
 LEARN = os.getenv("CARET_LEARN", "1") != "0"   # learn your words & word pairs (ngrams/user_model.dat, encrypted)
 GHOST = True                  # grey completion right after the cursor
+SHOW_LIST = True              # the list of suggestions (off: only the grey text, Tab/Enter insert it)
 ENTER_PICKS = True            # Enter inserts the highlighted suggestion (like Tab) while the list shows
 MY_WORDS_FIRST = True         # your most used words (typed 2+ times) come first and may fill the whole list
 USER_NAME = ""                # your name (Settings): the greeting, and the assistant signs drafts with it
@@ -89,7 +90,7 @@ REWRITE_MY_WORDS = True       # Ctrl+Alt+R also sends your 40 most used single w
 SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "settings.json")
 SETTINGS = {"predict": "PREDICT", "ghost": "GHOST", "count": "PREDICT_COUNT", "autocorrect": "AUTOCORRECT",
             "learn": "LEARN", "engine": "PREDICT_ENGINE", "terminals": "PREDICT_IN_TERMINALS",
-            "name": "USER_NAME", "welcomed": "WELCOMED", "enter": "ENTER_PICKS", "mine_first": "MY_WORDS_FIRST",
+            "name": "USER_NAME", "welcomed": "WELCOMED", "enter": "ENTER_PICKS", "list": "SHOW_LIST", "mine_first": "MY_WORDS_FIRST",
             "style": "REWRITE_STYLE", "manglish": "MANGLISH", "rewrite_words": "REWRITE_MY_WORDS"}
 
 
@@ -1632,14 +1633,14 @@ class Predictions:
             ctrl, alt, shift, win = self.mods()
             pick = None
             plain = not (ctrl or alt or shift or win)
-            if plain and vk in (0x26, 0x28):          # up / down: move the highlight
+            if plain and SHOW_LIST and vk in (0x26, 0x28):   # up / down: move the highlight
                 self.swallow_up.add(vk)
                 step = -1 if vk == 0x26 else 1
                 self.app.q.put(lambda: self.move(step))
                 self.kb.suppress_event()
             if (vk == 0x09 or (vk == 0x0D and ENTER_PICKS)) and plain:   # Tab / Enter: the highlighted one
                 pick = min(self.sel, len(self.shown) - 1)
-            elif plain:
+            elif plain and SHOW_LIST:
                 n = len(self.shown)
                 if 0x31 <= vk < 0x31 + n:              # 1..5 on the number row
                     pick = vk - 0x31
@@ -1682,7 +1683,7 @@ class Predictions:
         """While the list shows, Tab / Enter / up / down / 1-n are Careter's (Linux)."""
         if IS_WIN:
             return
-        names = {"tab", "up", "down"} | {str(i + 1) for i in range(len(self.shown))}
+        names = {"tab"} | ({"up", "down"} | {str(i + 1) for i in range(len(self.shown))} if SHOW_LIST else set())
         if ENTER_PICKS:
             names.add("enter")
         self.grabber.set(names if (self.visible and self.shown) else ())
@@ -1690,6 +1691,8 @@ class Predictions:
     def on_grabbed(self, name):
         """A grabbed key (Linux). Returns False if the list is gone: then the app gets the key."""
         if not (self.enabled and self.visible and self.shown):
+            return False
+        if name not in ("tab", "enter") and not SHOW_LIST:
             return False
         if name in ("up", "down"):
             step = -1 if name == "up" else 1
@@ -2168,12 +2171,13 @@ class Predictions:
             log(f"predict: grey text {'shown' if reason == 'shown' else 'skipped: ' + reason}")
 
     def place_ghost(self, point):
+        """Show the grey text at the cursor. True if it's showing."""
         if not self.ghost or not self.shown:
-            return
+            return False
         text = self.shown[self.sel][1].rstrip(" ")
         if text.startswith("\b"):                     # a fix replaces the word: nothing to add after it
             self.native("ghost", False)
-            return
+            return False
         x, top, bottom = point
         if self.ghost_bg[0] == point:                  # same spot (arrow keys, better words arrived):
             bg = self.ghost_bg[1]                      # don't re-read the screen, our grey text is on it
@@ -2185,7 +2189,7 @@ class Predictions:
         if not bg:
             self.native("ghost", False)
             self.ghost_why("text (or a pattern) right after the cursor, so it would cover it")
-            return
+            return False
         self.ghost_why("shown")
         # the transparent colour = the line's own background, so the grey text's smoothed edges
         # blend into it and look like part of the app
@@ -2199,6 +2203,7 @@ class Predictions:
         self.ghost.geometry(f"+{int(x) + 1}+{int(top + ((bottom - top) - h) / 2)}")
         self.ghost.update_idletasks()
         self.native("ghost", True)
+        return True
 
     def round_corners(self):
         """Windows 11: smooth rounded corners and a thin border drawn by the system. True if it worked;
@@ -2384,6 +2389,15 @@ class Predictions:
                   lambda i=i: threading.Thread(target=self.accept, args=(self.shown[i],), daemon=True).start())
                  for i, (w, ins) in enumerate(words)]
         self.fill(items)
+        if not SHOW_LIST:                    # list off in Settings: only the grey text (Tab/Enter insert it)
+            self.native("strip", False)
+            self.ghost_point = point if (exact and GHOST) else None
+            if not (self.ghost_point and self.place_ghost(point)):
+                self.ghost_point, self.visible, self.shown = None, False, []   # nothing on screen to pick
+                if self.ghost:
+                    self.native("ghost", False)
+            self.grab_keys()
+            return
         self.place_strip(point)
         self.ghost_point = point if (exact and GHOST) else None
         if self.ghost_point:
@@ -2444,6 +2458,7 @@ Careter runs quietly in the background. You don't open it: just type anywhere (N
 • Mouse: click a suggestion to insert it. In the way? Press and drag the list anywhere (or by its • • • grip). It stays at that spot while you type in that window; double-click the grip to put it back.
 • The ⚙ on the list opens these settings (handy if Ctrl+Alt+S is taken on your PC).
 • Don't want Enter to pick suggestions? Settings → Typing → switch off "Enter also inserts the suggestion".
+• Don't want the popup? Settings → Typing → switch off "Show the suggestion list". You'll only see the grey text after the cursor; Tab (or Enter) inserts it. Apps that don't report the cursor then show nothing.
 • At the start of a sentence, type the first letter and suggestions appear.
 • While the list is showing, ↑ ↓, Tab, Enter and 1–5 belong to Careter; the rest of the time they work as usual (press Esc first if you want a new line).
 • No grey text? Some apps don't tell Windows where the cursor is. The list still appears (at the mouse), just without grey text.
@@ -2870,6 +2885,7 @@ class SettingsWindow:
         header("Typing")
         switch("predict", "Word suggestions while I type", pred.enabled if pred else PREDICT,
                "(also: double-tap Ctrl)")
+        switch("list", "Show the suggestion list", SHOW_LIST, "(off: only the grey text, no popup)")
         switch("ghost", "Grey text after the cursor (Tab inserts it)", GHOST)
         switch("enter", "Enter also inserts the suggestion", ENTER_PICKS, "(off: Enter always makes a new line)")
         row = tk.Frame(page, bg=S_BG)
@@ -3253,6 +3269,7 @@ class SettingsWindow:
 
     def changed(self, key):
         global PREDICT, GHOST, PREDICT_COUNT, AUTOCORRECT, LEARN, PREDICT_ENGINE, PREDICT_IN_TERMINALS, ENTER_PICKS, MY_WORDS_FIRST
+        global SHOW_LIST
         global REWRITE_MY_WORDS
         pred = self.app.predictions
         if key == "count":
@@ -3275,6 +3292,14 @@ class SettingsWindow:
                 GHOST = v
             elif key == "enter":
                 ENTER_PICKS = v
+            elif key == "list":
+                SHOW_LIST = v
+                if pred:
+                    pred.reset()
+                if not v and not GHOST:
+                    self.say("List and grey text are both off: no suggestions show (auto-correct still works).")
+                elif not v:
+                    self.say("No popup now: only the grey text. Tab (or Enter) inserts it.")
             elif key == "mine_first":
                 MY_WORDS_FIRST = v
                 if pred:
