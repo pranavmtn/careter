@@ -29,7 +29,7 @@ Select some text (or just put the cursor on a line) and press **Ctrl+Alt+R**. Wi
 
 When the bubble opens it first says what it sees and offers 2–4 one-click next actions; you can also type or speak your own. Settings (`CONTEXT_CHARS`, `SECTION_BREAKS`, `AUTO_SUGGEST`) are at the top of `caret_ai.py`.
 
-## Word prediction (Windows, local, no API key)
+## Word prediction (Windows and Ubuntu/Linux, local, no API key)
 
 While you type anywhere, Careter suggests the next word, or the rest of the word you're typing, in a small strip at the caret:
 
@@ -144,5 +144,22 @@ python caret_ai.py
 
 ### Platform notes
 - **macOS:** grant your terminal Screen Recording, Accessibility and Microphone permission in System Settings.
-- **Linux:** needs an X11 session (Wayland blocks global hotkeys and simulated input).
+- **Linux:** needs an X11 session (Wayland blocks global hotkeys and simulated input). See *Ubuntu / Linux* below.
 - **Windows:** works as-is.
+
+## Ubuntu / Linux
+
+Word suggestions, grey text, auto-correct, learning, Manglish, the assistant and rewrite all work on Ubuntu and other Linux desktops running X11.
+
+1. **Use X11, not Wayland.** Log out, click the ⚙ at the bottom right of the login screen, choose **Ubuntu on Xorg**, log in. `echo $XDG_SESSION_TYPE` should print `x11`.
+2. **Install:** `curl -fsSL https://raw.githubusercontent.com/pranavmtn/careter/main/install.sh | bash`. It installs the system packages it needs with apt (`python3-tk`, `python3-venv`, `xclip`, `libportaudio2`, `python3-gi`, `gir1.2-atspi-2.0`), so it may ask for your password. It also turns on GNOME's accessibility setting so apps report where the cursor is, sets Careter to start at login, and starts it.
+3. **Update:** `~/careter/.venv/bin/python ~/careter/caret_ai.py --stop`, then `cd ~/careter && git pull`, then `nohup ~/careter/.venv/bin/python ~/careter/caret_ai.py >/dev/null 2>&1 &`.
+
+How it differs from Windows:
+- **Cursor position** comes from accessibility (AT-SPI). GNOME apps (Text Editor, gedit), LibreOffice, Firefox and most GTK/Qt apps report it, so the list sits under your text and the grey text shows. In Chrome, add the browser helper extension (`chrome-extension/`) for the same. Apps that report nothing get the list at the mouse, without grey text.
+- **Tab, Enter, ↑ ↓ and 1–5** are taken by Careter only while the list is showing (an X11 key grab), exactly like on Windows.
+- **Auto-correct** fixes the word just after the space reaches the app (X11 can't hold a single key back), so you may see the typo for a split second.
+- **Learned words** are stored in a file only your user can read (not encrypted with a login key as on Windows).
+- **Not on Linux:** the Windows-only scheduled task (`--autostart`); login start uses `~/.config/autostart/careter.desktop` instead. Terminals are skipped by default, as on Windows.
+- If something's off, `~/careter/careter.log` (or Settings → Log) says why. It never contains what you typed.
+

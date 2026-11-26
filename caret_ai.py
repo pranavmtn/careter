@@ -71,7 +71,8 @@ PREDICT_COUNT = 5             # suggestions shown, picked with keys 1-5
 PREDICT_IN_TERMINALS = False  # shell commands aren't prose; off by default
 PREDICT_HOTKEY = "double-tap Ctrl (or Ctrl+Alt+P)"  # turns predictions (and auto-correct) on/off
 AUTOCORRECT = os.getenv("CARET_AUTOCORRECT", "1") != "0"   # fix clear typos when you press space
-BROWSERS = {"chrome.exe", "msedge.exe", "brave.exe", "vivaldi.exe", "opera.exe", "chromium.exe"}
+BROWSERS = {"chrome.exe", "msedge.exe", "brave.exe", "vivaldi.exe", "opera.exe", "chromium.exe",
+            "chrome", "chromium", "chromium-browser", "brave", "msedge", "vivaldi-bin", "opera"}   # Linux
 WEB_PORT = 47822              # the Careter browser extension reports the caret here (127.0.0.1 only)
 LEARN = os.getenv("CARET_LEARN", "1") != "0"   # learn your words & word pairs (ngrams/user_model.dat, encrypted)
 GHOST = True                  # grey completion right after the cursor
@@ -114,9 +115,15 @@ load_settings()
 
 IS_MAC = platform.system() == "Darwin"
 IS_WIN = platform.system() == "Windows"
+IS_LINUX = platform.system() == "Linux"
+ATSPI = None                  # Linux: the accessibility reader (cursor position), set by Predictions
 # Never send Ctrl+C to these (it would interrupt the running command)
 TERMINALS = {"windowsterminal.exe", "wt.exe", "powershell.exe", "pwsh.exe", "cmd.exe",
-             "conhost.exe", "mintty.exe", "openconsole.exe", "alacritty.exe", "wezterm-gui.exe"}
+             "conhost.exe", "mintty.exe", "openconsole.exe", "alacritty.exe", "wezterm-gui.exe",
+             # Linux
+             "gnome-terminal-server", "gnome-terminal-", "kgx", "ptyxis", "konsole", "xterm", "uxterm",
+             "tilix", "terminator", "xfce4-terminal", "kitty", "alacritty", "wezterm-gui", "lxterminal",
+             "mate-terminal", "qterminal", "urxvt", "st", "foot", "guake", "yakuake", "terminology"}
 pyautogui.FAILSAFE = True   # move mouse to a screen corner to abort typing
 def has_ai_key():
     return bool(os.environ.get("OPENAI_API_KEY", "").strip())
@@ -307,7 +314,11 @@ def wait_for_hotkey_release(timeout=1.5, vks=(0x11, 0x12, 0x20)):
 
 
 def foreground_window():
-    """(window handle, process name) of the app the user is in. Windows only."""
+    """(window handle, process name) of the app the user is in (Windows; Linux on X11)."""
+    if IS_LINUX:
+        import linux_x11
+        wid, name, _ = linux_x11.active_window()
+        return wid, name
     if not IS_WIN:
         return None, ""
     import ctypes
@@ -583,9 +594,18 @@ def format_context(ctx):
     return f"{before}{middle}{after}"
 
 
+def linux_window_pid(wid):
+    import linux_x11
+    return linux_x11.window_pid(wid) if wid else 0
+
+
 def caret_rect():
     """Screen rect (left, top, bottom) of the text caret in the active app, or None. Windows only;
-    many apps (browsers, Electron) don't expose a caret, so callers fall back to the mouse."""
+    many apps (browsers, Electron) don't expose a caret, so callers fall back to the mouse.
+    Linux: from accessibility (AT-SPI), where the app supports it."""
+    if IS_LINUX and ATSPI is not None:
+        import linux_x11
+        return ATSPI.caret(linux_x11.active_window()[2])
     if not IS_WIN:
         return None
     import ctypes
@@ -1400,8 +1420,13 @@ class Predictions:
     BUF_MAX = 400
 
     def __init__(self, app):
-        import ctypes
-        self.user32 = ctypes.windll.user32
+        global ATSPI
+        if IS_WIN:
+            import ctypes
+            self.user32 = ctypes.windll.user32
+        else:
+            import linux_x11
+            self.user32, self.held, self.inject = None, set(), [0, 0.0]
         self.app = app
         self.enabled = PREDICT
         self.predictor = None
@@ -1410,7 +1435,9 @@ class Predictions:
         self.fast_predictor = None
         self.sel, self.rows, self.shown_gen, self.ghost = 0, [], -1, None
         self.ghost_point, self.ghost_bg = None, (None, None)
-        self.uia = UiaReader()
+        self.uia = UiaReader() if IS_WIN else linux_x11.AtspiReader(log)
+        if not IS_WIN:
+            ATSPI = self.uia
         self.epoch, self.last_exact = 0, None       # last exact caret spot in this window (for pass 1)
         self.last_seen = None                       # (window, epoch, text) read while you typed
         self.snaps = {}                             # window -> (keys typed there before a click, when)
@@ -1429,10 +1456,18 @@ class Predictions:
         self.swallow_up = set()            # keys whose key-up we also hide from the app
         self.strip = None
         self.strip_rect = (0, 0, 0, 0)
-        self.w = self.typed_user32()
+        self.w = self.typed_user32() if IS_WIN else None
         app.q.put(self.build_strip)
         threading.Thread(target=self.load, daemon=True).start()
-        self.kb = keyboard.Listener(on_press=self.on_press, win32_event_filter=self.filter)
+        if IS_WIN:
+            self.kb = keyboard.Listener(on_press=self.on_press, win32_event_filter=self.filter)
+        else:
+            # X11: keys can be watched but not hidden one by one, so the keys that pick a suggestion
+            # are grabbed only while the list shows (KeyGrabber), and auto-correct fixes the word
+            # after the space has gone through
+            self.grabber = linux_x11.KeyGrabber(self.on_grabbed, log)
+            self.grabber.start()
+            self.kb = keyboard.Listener(on_press=self.on_press, on_release=self.on_release)
         self.kb.start()
         self.ms = mouse.Listener(on_click=self.on_click)
         self.ms.start()
@@ -1569,6 +1604,10 @@ class Predictions:
 
     # --- keyboard
     def mods(self):
+        if not IS_WIN:
+            K, h = keyboard.Key, self.held
+            return (bool(h & {K.ctrl, K.ctrl_l, K.ctrl_r}), bool(h & {K.alt, K.alt_l, K.alt_r}),
+                    bool(h & {K.shift, K.shift_r}), bool(h & {K.cmd, K.cmd_r}))
         down = lambda vk: bool(self.user32.GetAsyncKeyState(vk) & 0x8000)
         return down(0x11), down(0x12), down(0x10), down(0x5B) or down(0x5C)   # ctrl, alt, shift, win
 
@@ -1613,14 +1652,85 @@ class Predictions:
                 self.kb.suppress_event()       # the app never sees this key
         return True
 
+    # --- Linux (X11)
+    def is_mod(self, key):
+        K = keyboard.Key
+        return key in (K.shift, K.shift_r, K.caps_lock, K.ctrl, K.ctrl_l, K.ctrl_r,
+                       K.alt, K.alt_l, K.alt_r, K.alt_gr, K.cmd, K.cmd_r)
+
+    def on_release(self, key):
+        self.held.discard(key)
+
+    @staticmethod
+    def key_name(key):
+        """The KeyGrabber name for a pynput key ("tab", "enter", "up", "down", "1"…), or None."""
+        K = keyboard.Key
+        named = {K.tab: "tab", K.enter: "enter", K.up: "up", K.down: "down"}
+        if key in named:
+            return named[key]
+        char = getattr(key, "char", None)
+        if char and char in "123456789":
+            return char
+        vk = getattr(key, "vk", None)                  # numpad 1-9 (keysyms KP_1… = 0xffb1…)
+        if vk and 0xffb1 <= vk <= 0xffb9:
+            return str(vk - 0xffb0)
+        if vk == 0xff8d:
+            return "enter"                             # numpad Enter
+        return None
+
+    def grab_keys(self):
+        """While the list shows, Tab / Enter / up / down / 1-n are Careter's (Linux)."""
+        if IS_WIN:
+            return
+        names = {"tab", "up", "down"} | {str(i + 1) for i in range(len(self.shown))}
+        if ENTER_PICKS:
+            names.add("enter")
+        self.grabber.set(names if (self.visible and self.shown) else ())
+
+    def on_grabbed(self, name):
+        """A grabbed key (Linux). Returns False if the list is gone: then the app gets the key."""
+        if not (self.enabled and self.visible and self.shown):
+            return False
+        if name in ("up", "down"):
+            step = -1 if name == "up" else 1
+            self.app.q.put(lambda: self.move(step))
+            return True
+        if name in ("tab", "enter"):
+            if name == "enter" and not ENTER_PICKS:
+                return False
+            pick = min(self.sel, len(self.shown) - 1)
+        else:
+            pick = int(name) - 1
+            if pick >= len(self.shown):
+                return False
+        choice = self.shown[pick]
+        threading.Thread(target=self.accept, args=(choice,), daemon=True).start()
+        return True
+
+    def injecting(self, keys):
+        """Linux: the next `keys` key presses (not counting Shift) are Careter typing, not you."""
+        if not IS_WIN:
+            self.inject = [self.inject[0] + keys if time.time() < self.inject[1] else keys, time.time() + 3]
+
     def on_press(self, key):
+        if not IS_WIN:
+            if self.is_mod(key):
+                self.held.add(key)
+            elif self.inject[0] > 0 and time.time() < self.inject[1]:
+                self.inject[0] -= 1
+                return                         # Careter typed this itself
+            name = self.key_name(key)
+            g = self.grabber.last
+            if name and ((self.visible and self.grabber.is_grabbed(name))
+                         or (g and g[0] == name and time.time() - g[1] < 0.5)):
+                return                         # a grabbed key: on_grabbed handles it
         if not self.enabled:
             return
         if not getattr(self, "seen_key", False):
             self.seen_key = True
             log("predict: keyboard hook is receiving keys")
         self.last_key_at = time.time()
-        hwnd = self.user32.GetForegroundWindow()
+        hwnd = self.user32.GetForegroundWindow() if IS_WIN else foreground_window()[0]
         if hwnd != self.buf_hwnd:              # another window: what we typed before doesn't apply
             self.snapshot()
             self.buf, self.buf_hwnd, self.last_fix = "", hwnd, None
@@ -1632,8 +1742,20 @@ class Predictions:
         ctrl, alt, _, win = self.mods()
         char = getattr(key, "char", None)
         if key == K.backspace and not (ctrl or alt):
+            if not IS_WIN and self.enabled and AUTOCORRECT and self.speller and not self.fixing:
+                job = self.check_undo()               # (the space already went: put back the word)
+                if job:
+                    self.fixing = True
+                    threading.Thread(target=job, daemon=True).start()
+                    return
             self.buf = self.buf[:-1]
         elif key == K.space and not (ctrl or alt or win):
+            if not IS_WIN and AUTOCORRECT and self.speller and not self.fixing:
+                job = self.check_fix()                # the space went through; the job fixes the word
+                if job:
+                    self.fixing = True
+                    threading.Thread(target=job, daemon=True).start()
+                    return
             self.buf += " "
             self.learn_last()
             self.buf = self.buf[-self.BUF_MAX:]
@@ -1700,7 +1822,9 @@ class Predictions:
     def apply_fix(self, word, new):
         try:
             self.hide()
-            pyautogui.press("backspace", presses=len(word), _pause=False)
+            gone = 0 if IS_WIN else 1                  # Linux: the space reached the app already
+            self.injecting(len(word) + gone + len(new) + 1)
+            pyautogui.press("backspace", presses=len(word) + gone, _pause=False)
             pyautogui.write(new + " ", _pause=False)
             self.buf = (self.buf[: -len(word)] + new + " ")[-self.BUF_MAX:]
             self.last_fix = (word, new, self.buf)
@@ -1724,7 +1848,9 @@ class Predictions:
     def apply_undo(self, word, new):
         try:
             self.hide()
-            pyautogui.press("backspace", presses=len(new) + 1, _pause=False)
+            gone = 0 if IS_WIN else 1                  # Linux: your Backspace removed the space already
+            self.injecting(len(new) + 1 - gone + len(word))
+            pyautogui.press("backspace", presses=len(new) + 1 - gone, _pause=False)
             pyautogui.write(word, _pause=False)
             self.buf = (self.buf[: -(len(new) + 1)] + word)[-self.BUF_MAX:]
             self.speller.remember(word)
@@ -1841,7 +1967,8 @@ class Predictions:
             if web:
                 source, text = "web", web.get("text") or ""
             else:
-                uia = self.uia.read(300, 0.25)
+                uia = (self.uia.read(300, 0.25) if IS_WIN else
+                       self.uia.read(300, 0.25, linux_window_pid(hwnd)))
                 if uia and uia[2]:
                     self.app.q.put(lambda: gen == self.gen and self.hide())
                     return why("skipped, password box")
@@ -1886,6 +2013,8 @@ class Predictions:
             log("predict failed:\n" + traceback.format_exc())
 
     def is_ours(self, hwnd):
+        if not IS_WIN:
+            return bool(hwnd) and linux_window_pid(hwnd) == os.getpid()
         from ctypes import wintypes, byref
         pid = wintypes.DWORD()
         self.user32.GetWindowThreadProcessId(hwnd, byref(pid))
@@ -1898,7 +2027,10 @@ class Predictions:
         self.gen += 1
         self.hide()
         time.sleep(0.03)
+        if not IS_WIN:
+            self.grabber.wait_released()       # or our own typing would be grabbed (digits)
         try:
+            self.injecting(fix + (len(insert) if insert.isascii() else 1))
             if fix:
                 pyautogui.press("backspace", presses=fix, _pause=False)
             if insert.isascii():
@@ -1913,6 +2045,24 @@ class Predictions:
         self.schedule(0)                       # offer the word after it straight away
 
     # --- the strip (UI thread only)
+    def native(self, which, show):
+        """Show (without taking focus, on top) or hide the list ("strip") or the grey text ("ghost")."""
+        if IS_WIN:
+            hwnd = self.strip_hwnd if which == "strip" else self.ghost_hwnd
+            self.w.ShowWindow(hwnd, 4 if show else 0)                  # SW_SHOWNOACTIVATE / SW_HIDE
+            if show:                                                   # topmost, no move/size/activate
+                self.w.SetWindowPos(hwnd, -1, 0, 0, 0, 0, 0x1 | 0x2 | 0x10)
+            return
+        win = self.strip if which == "strip" else self.ghost
+        if not win:
+            return
+        if show:
+            win.deiconify()
+            win.lift()
+            win.attributes("-topmost", True)
+        else:
+            win.withdraw()
+
     def build_strip(self):
         try:
             self._build_strip()
@@ -1931,6 +2081,12 @@ class Predictions:
         self.strip_box.pack()
         win.geometry("+-2000+-2000")
         win.update_idletasks()
+        if not IS_WIN:                  # X11: a borderless window the window manager never focuses
+            win.configure(highlightthickness=1, highlightbackground=STRIP_BORDER)
+            win.withdraw()
+            self.strip_hwnd, self.strip_checked, self.round_native = None, False, True
+            self.build_ghost()
+            return
         self.strip_hwnd = w.GetAncestor(win.winfo_id(), 2)          # GA_ROOT
         GWL_EXSTYLE, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW = -20, 0x08000000, 0x80
         style = w.GetWindowLongW(self.strip_hwnd, GWL_EXSTYLE)
@@ -1949,6 +2105,13 @@ class Predictions:
         g.attributes("-topmost", True)
         self.ghost_key = "#010203"
         g.configure(bg=self.ghost_key)
+        if not IS_WIN:                  # X11 has no see-through colour: the window gets the line's own
+            self.ghost_label = tk.Label(g, text="", bg="#ffffff", fg=GHOST_FG, bd=0, padx=0, pady=0)
+            self.ghost_label.pack()     # background colour instead (place_ghost), which looks the same
+            g.geometry("+-2000+-2000")
+            g.withdraw()
+            self.ghost_hwnd = None
+            return
         g.attributes("-transparentcolor", self.ghost_key)
         self.ghost_label = tk.Label(g, text="", bg=self.ghost_key, fg=GHOST_FG, bd=0, padx=0, pady=0)
         self.ghost_label.pack()
@@ -1967,6 +2130,17 @@ class Predictions:
     def line_background(self, x, top, bottom):
         """Colour of the empty space right after the cursor, or None if there's text there (then a
         grey completion would overlap it, so we don't show one)."""
+        ys = (top + (bottom - top) // 3, top + (bottom - top) // 2, top + 2 * (bottom - top) // 3)
+        if not IS_WIN:
+            import linux_x11
+            try:
+                colors = linux_x11.line_colors([(x + dx, y) for dx in (4, 10, 18, 30, 45) for y in ys])
+            except Exception:
+                return None
+            if len(colors) != 1:
+                return None
+            r, g_, b = colors.pop()[:3]
+            return f"#{r:02x}{g_:02x}{b:02x}"
         import ctypes
         u, g = ctypes.WinDLL("user32"), ctypes.WinDLL("gdi32")
         u.GetDC.restype = ctypes.c_void_p
@@ -1998,33 +2172,33 @@ class Predictions:
             return
         text = self.shown[self.sel][1].rstrip(" ")
         if text.startswith("\b"):                     # a fix replaces the word: nothing to add after it
-            self.w.ShowWindow(self.ghost_hwnd, 0)
+            self.native("ghost", False)
             return
         x, top, bottom = point
         if self.ghost_bg[0] == point:                  # same spot (arrow keys, better words arrived):
             bg = self.ghost_bg[1]                      # don't re-read the screen, our grey text is on it
         else:
-            self.w.ShowWindow(self.ghost_hwnd, 0)
+            self.native("ghost", False)
             bg = self.line_background(x, top, bottom)
             self.ghost_bg = (point, bg)
         bg = bg if text else None
         if not bg:
-            self.w.ShowWindow(self.ghost_hwnd, 0)
+            self.native("ghost", False)
             self.ghost_why("text (or a pattern) right after the cursor, so it would cover it")
             return
         self.ghost_why("shown")
         # the transparent colour = the line's own background, so the grey text's smoothed edges
         # blend into it and look like part of the app
         self.ghost.configure(bg=bg)
-        self.ghost.attributes("-transparentcolor", bg)
+        if IS_WIN:
+            self.ghost.attributes("-transparentcolor", bg)
         px = max(10, min(48, round((bottom - top) * 0.72)))
         self.ghost_label.configure(text=text, bg=bg, font=(STRIP_FONT[0], -px))
         self.ghost.update_idletasks()
         h = self.ghost.winfo_reqheight()
         self.ghost.geometry(f"+{int(x) + 1}+{int(top + ((bottom - top) - h) / 2)}")
         self.ghost.update_idletasks()
-        self.w.ShowWindow(self.ghost_hwnd, 4)          # SW_SHOWNOACTIVATE
-        self.w.SetWindowPos(self.ghost_hwnd, -1, 0, 0, 0, 0, 0x1 | 0x2 | 0x10)
+        self.native("ghost", True)
 
     def round_corners(self):
         """Windows 11: smooth rounded corners and a thin border drawn by the system. True if it worked;
@@ -2162,6 +2336,16 @@ class Predictions:
             y = max(mtop, min(y + off[2], mbottom - h))
         self.strip_rect = (x, y, x + w_, y + h)
         w = self.w
+        if not IS_WIN:
+            self.strip.geometry(f"+{int(x)}+{int(y)}")
+            self.native("strip", True)
+            self.grab_keys()
+            if not self.strip_checked:
+                self.strip_checked = True
+                self.strip.update_idletasks()
+                log(f"predict: strip visible={bool(self.strip.winfo_viewable())} at {int(x)},{int(y)} "
+                    f"size {w_}x{h} (X11)")
+            return
         before = w.GetForegroundWindow()
         self.strip.geometry(f"+{int(x)}+{int(y)}")
         self.strip.update_idletasks()
@@ -2206,7 +2390,7 @@ class Predictions:
             self.place_ghost(point)
         else:
             if self.ghost:
-                self.w.ShowWindow(self.ghost_hwnd, 0)
+                self.native("ghost", False)
             self.ghost_why("off in settings" if not GHOST else
                            "this app doesn't tell Windows where the cursor is (list shown at the mouse)")
 
@@ -2223,16 +2407,19 @@ class Predictions:
     def hide(self):
         was = self.visible
         self.visible, self.shown = False, []
+        if not IS_WIN and getattr(self, "grabber", None):
+            self.grabber.release()             # Tab, Enter, arrows and 1-5 go back to the app
         if was and self.strip:
             def _hide():
-                self.w.ShowWindow(self.strip_hwnd, 0)
+                self.native("strip", False)
                 if self.ghost:
-                    self.w.ShowWindow(self.ghost_hwnd, 0)
+                    self.native("ghost", False)
             self.app.q.put(_hide)
 
 
 PRIVACY_NOTE = ("Your data stays on this PC. Suggestions, auto-correct and everything Careter learns run "
-                "here and are never sent anywhere (what it learns is encrypted with your Windows login). "
+                "here and are never sent anywhere (what it learns is " +
+                ("encrypted with your Windows login). " if IS_WIN else "in a file only your user account can read). ") +
                 "Only the Ctrl+Alt+Space assistant and Ctrl+Alt+R rewrite go online: when you use them, the text "
                 "around your cursor (rewrite: the text you're rewriting and your 40 most used words) goes to the "
                 "AI service you chose in Settings, and nowhere else.")
@@ -2336,6 +2523,14 @@ $ .\.venv\Scripts\python caret_ai.py
 • run it in the PowerShell window to watch its messages (stop it first)
 $ .\.venv\Scripts\python caret_ai.py --settings
 • open this window
+
+## Ubuntu / Linux
+Needs an X11 session: at the login screen click the gear icon and choose "Ubuntu on Xorg". Install:
+$ curl -fsSL https://raw.githubusercontent.com/pranavmtn/careter/main/install.sh | bash
+Update (stop, pull, start):
+$ ~/careter/.venv/bin/python ~/careter/caret_ai.py --stop
+$ cd ~/careter && git pull
+$ nohup ~/careter/.venv/bin/python ~/careter/caret_ai.py >/dev/null 2>&1 &
 
 ## Uninstall
 $ .\.venv\Scripts\python caret_ai.py --autostart off
@@ -3160,6 +3355,16 @@ class App:
         self.log_start = 0
         self.root.after(15, self.pump)
         self.predictions = None
+        if IS_LINUX:
+            import linux_x11
+            ok, why = linux_x11.session_ok()
+            if ok:
+                try:
+                    self.predictions = Predictions(self)
+                except Exception:
+                    log("predict: could not start:\n" + traceback.format_exc())
+            else:
+                log(f"predict: word prediction is off: {why}")
         if IS_WIN:
             try:
                 self.predictions = Predictions(self)
@@ -3174,7 +3379,12 @@ class App:
             hotkeys[4] = (0x2 | 0x1, ord("R"), self.on_rewrite)                  # Ctrl+Alt+R
             threading.Thread(target=windows_hotkey_loop, args=(hotkeys,), daemon=True).start()
         else:
-            keyboard.GlobalHotKeys({HOTKEY: self.on_hotkey, "<ctrl>+<alt>+r": self.on_rewrite}).start()
+            keys = {HOTKEY: self.on_hotkey, "<ctrl>+<alt>+r": self.on_rewrite,
+                    "<ctrl>+<alt>+s": lambda: self.q.put(self.open_settings)}
+            if self.predictions:
+                keys["<ctrl>+<alt>+p"] = self.predictions.toggle
+                self.double_ctrl = DoubleCtrl(self.predictions.toggle)
+            keyboard.GlobalHotKeys(keys).start()
         print(f"Careter running ({MODEL if has_ai_key() else 'no AI key yet'}). Press {HOTKEY} anywhere. "
               "Ctrl+C here to quit.")
         if not WELCOMED:
@@ -3505,6 +3715,21 @@ def autostart_command(mode):
 def stop_command():
     """--stop: close the running Careter (with auto-start on, it comes back within 5 minutes)."""
     import subprocess
+    if not IS_WIN:                                  # Mac/Linux: find it by its command line
+        import signal
+        stopped = []
+        for line in subprocess.run(["ps", "-eo", "pid=,args="], capture_output=True, text=True).stdout.splitlines():
+            pid, _, args = line.strip().partition(" ")
+            if pid.isdigit() and int(pid) != os.getpid() and "caret_ai.py" in args and "--" not in args \
+                    and "python" in args:
+                try:
+                    os.kill(int(pid), signal.SIGTERM)
+                    stopped.append(pid)
+                except OSError:
+                    pass
+        print(f"Stopped Careter ({len(stopped)} process{'es' if len(stopped) != 1 else ''})." if stopped
+              else "Careter wasn't running.")
+        return
     ps = ("Get-CimInstance Win32_Process | Where-Object { $_.Name -like 'python*' -and "
           f"$_.CommandLine -like '*caret_ai.py*' -and $_.ProcessId -ne {os.getpid()} -and "
           "$_.CommandLine -notlike '*--stop*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force; $_.ProcessId }")

@@ -675,7 +675,7 @@ def _dpapi(data, encrypt):
 
 
 def protect(data):
-    """bytes -> what goes on disk (encrypted on Windows, unchanged elsewhere)."""
+    """bytes -> what goes on disk (encrypted on Windows; elsewhere unchanged, in a file only you can read)."""
     return SECURE_MAGIC + _dpapi(data, True) if os.name == "nt" else data
 
 
@@ -700,6 +700,8 @@ def write_private(path, data, legacy=None):
     tmp = path + ".tmp"
     with open(tmp, "wb") as f:
         f.write(protect(data))
+    if os.name != "nt":
+        os.chmod(tmp, 0o600)                            # Mac/Linux: readable only by you
     os.replace(tmp, path)
     if legacy and os.path.exists(legacy):
         os.remove(legacy)                               # the old plain-text copy is no longer needed
